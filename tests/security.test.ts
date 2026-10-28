@@ -4,6 +4,7 @@ import { renderInlineSafe } from "../src/lib/safe-markdown";
 import {
   exceedsContentLength,
   normalizePublicHttpUrls,
+  readFormDataWithLimit,
   validateFiles,
   MAX_FILE_BYTES,
 } from "../src/lib/request-validation";
@@ -34,4 +35,28 @@ test("request and upload limits reject malformed and oversized input", () => {
   assert.equal(exceedsContentLength("not-a-number", 1024), true);
   assert.equal(exceedsContentLength("2048", 1024), true);
   assert.match(validateFiles([{ name: "large.pdf", size: MAX_FILE_BYTES + 1 }]) || "", /不能超过/);
+});
+
+test("multipart parsing enforces a streaming byte limit even without Content-Length", async () => {
+  const oversizedBody = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("x".repeat(100)));
+      controller.close();
+    },
+  });
+  const request = new Request("http://localhost/api", {
+    method: "POST",
+    headers: { "content-type": "multipart/form-data; boundary=limited-test" },
+    body: oversizedBody,
+    duplex: "half",
+  } as RequestInit);
+  const oversized = await readFormDataWithLimit(request, 8);
+  assert.deepEqual(oversized, { ok: false, reason: "too_large" });
+
+  const validForm = new FormData();
+  validForm.set("source_urls", "[]");
+  const validRequest = new Request("http://localhost/api", { method: "POST", body: validForm });
+  const valid = await readFormDataWithLimit(validRequest, 1024);
+  assert.equal(valid.ok, true);
+  if (valid.ok) assert.equal(valid.value.get("source_urls"), "[]");
 });

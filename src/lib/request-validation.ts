@@ -38,6 +38,41 @@ export async function readJsonWithLimit(request: Request, maxBytes: number): Pro
   }
 }
 
+export async function readFormDataWithLimit(request: Request, maxBytes: number): Promise<
+  { ok: true; value: FormData } | { ok: false; reason: "too_large" | "invalid" }
+> {
+  if (!request.body) return { ok: false, reason: "invalid" };
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return { ok: false, reason: "too_large" };
+      }
+      chunks.push(value);
+    }
+    const body = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const response = new Response(body, {
+      headers: { "content-type": request.headers.get("content-type") || "" },
+    });
+    return { ok: true, value: await response.formData() };
+  } catch {
+    return { ok: false, reason: "invalid" };
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

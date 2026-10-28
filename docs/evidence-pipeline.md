@@ -166,3 +166,4 @@ A precise explanation of the module is:
 > I worked on the evidence extraction and conflict detection part of the reporting workflow. The workflow accepts parsed document chunks or knowledge-base results, extracts atomic claims, normalizes comparable fields while preserving source provenance, and then separates deterministic numeric checks from semantic contradiction checks. The output is an evidence ledger and a conflict register linked by IDs, so later report sections can cite both the claim and its source. The next engineering step is to version the Coze graph and evaluate extraction, deduplication, and conflict detection on a labeled set; without that evaluation, I would not claim a measured accuracy improvement.
 
 If the exact Coze prompts or rule thresholds differ from this target design, describe what is currently configured and identify these recommendations as future work.
+

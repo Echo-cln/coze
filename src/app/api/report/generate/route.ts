@@ -12,7 +12,7 @@ import {
   isStorageAvailable,
 } from "@/lib/storage";
 import { evaluateReportQuality } from "@/lib/quality";
-import { exceedsContentLength, isRecord, MAX_JSON_REQUEST_BYTES, MAX_TOTAL_UPLOAD_BYTES, normalizePublicHttpUrls, readJsonWithLimit, validateFiles } from "@/lib/request-validation";
+import { exceedsContentLength, isRecord, MAX_JSON_REQUEST_BYTES, MAX_TOTAL_UPLOAD_BYTES, normalizePublicHttpUrls, readFormDataWithLimit, readJsonWithLimit, validateFiles } from "@/lib/request-validation";
 import { escapeHtml } from "@/lib/safe-markdown";
 
 export const runtime = "nodejs";
@@ -63,7 +63,9 @@ export async function POST(req: NextRequest) {
 
   try {
   if (multipart) {
-    const formData = await req.formData();
+    const formResult = await readFormDataWithLimit(req, MAX_TOTAL_UPLOAD_BYTES + 2_000_000);
+    if (!formResult.ok) return Response.json({ error: formResult.reason === "too_large" ? "请求体超过允许大小" : "请求内容格式无效" }, { status: formResult.reason === "too_large" ? 413 : 400 });
+    const formData = formResult.value;
     jobId = (formData.get("job_id") as string) || jobId;
     industry = (formData.get("industry") as string) || industry;
     templateId = (formData.get("template_id") as string) || templateId;
