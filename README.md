@@ -88,22 +88,39 @@ C 模块承接解析切片或知识库检索结果，产出可供报告生成使
 
 ### 环境要求
 
-- Node.js 20+
-- pnpm 9+
+- Node.js 20.19+
+- pnpm 11.25+
 
 ### 启动
 
 ```bash
 git clone https://github.com/Echo-cln/coze.git
 cd coze
-pnpm install
+corepack enable
+corepack prepare pnpm@11.25.0 --activate
+pnpm install --frozen-lockfile
 cp .env.example .env.local
 pnpm dev
+```
+
+运行安全回归：
+
+```bash
+pnpm test:security
 ```
 
 浏览器访问 [http://localhost:5000](http://localhost:5000)。
 
 未配置工作流地址时，应用会使用 mock 数据展示界面和流程交互；这适合本地预览，不代表真实材料已被解析或评估。要运行真实链路，请在 `.env.local` 配置已部署的工作流端点和对应凭证。
+
+### 生产构建与启动
+
+```bash
+pnpm build
+COZE_PROJECT_ENV=PROD PORT=5000 pnpm start
+```
+
+自定义运行端口时同步设置 `PORT`。部署平台需将应用绑定到容器可访问的网络接口，并在平台密钥管理中配置工作流凭证；不要将 `.env.local` 或密钥写入镜像。
 
 ## 工作流配置
 
@@ -132,6 +149,33 @@ pnpm dev
 | `POST /api/report/audit-pack` | 将当前任务结果生成可下载的 JSON 审计包 |
 
 生成接口在正文生成后执行确定性的结构完整性检查：验证引用编号是否存在、必备章节是否齐全，并统计来源解析状态和正文段落引用率。它不代表事实正确率或模型效果基准。生成接口以 SSE 事件向前端推送流程状态。主要事件为 `progress`、`evidence`、`conflict`、`content`、`metrics`、`done` 和 `error`。具体输入和输出字段以 `src/app/api/report/` 下的路由实现与工作流契约为准。
+
+## 本地验证
+
+```bash
+pnpm test:security
+pnpm ts-check
+pnpm lint:build
+pnpm lint:style
+pnpm audit --registry=https://registry.npmjs.org
+pnpm build
+```
+
+GitHub Actions 会在 push 和 pull request 上运行同一组检查。
+
+## 安全与部署边界
+
+这个仓库包含服务端 API 和外部工作流凭证配置。真实链路上线时，请把应用放在公司 SSO、身份认证网关或可信访问代理之后；当前仓库没有内置用户认证、租户隔离、持久化任务授权或跨实例限流，不能把配置了真实 Token 的公开实例直接暴露到互联网。
+
+目前已落实的基础防护包括：
+
+- 报告预览先转义文本，只允许 HTTP/HTTPS 和页内锚点链接，避免模型输出把脚本注入工作台。
+- API 限制 JSON 请求体为 8 MB；上传最多 20 个文件、单文件 20 MB、合计 100 MB，并校验允许的扩展名。
+- 在线来源仅接受公网 HTTP/HTTPS 地址，并拒绝常见私网、回环和本机地址；工作流服务也应配置出站网络限制，抵御 DNS 解析变化和工作流侧 SSRF。
+- 对外请求设有超时；错误响应不回传上游服务正文；导出接口限制请求大小并禁用缓存。
+- 移除通配远程图片主机，并添加基础安全响应头。
+
+依赖扫描使用 npm 官方审计源；本次锁文件审计结果为 **0 条已知漏洞**。审计数据库会变化，升级依赖后应重新运行 `pnpm audit`。自动化检查不等同于渗透测试，也不能证明 Coze 工作流、对象存储策略或部署网络配置安全。部署前应单独验证身份认证、存储桶访问权限、签名 URL 有效期、工作流出站访问规则与日志脱敏。不要上传真实敏感材料进行公开演示。
 
 ## 当前边界与下一步
 
@@ -164,3 +208,4 @@ assets/                   # 界面截图与工作流接口资料
 ---
 
 **EvidenceOS · Reports you can trace back to evidence.**
+

@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { uploadAndGetSignedUrl, isStorageAvailable } from "@/lib/storage";
 import type { SourceRegistry, ParsedChunk } from "@/lib/types";
+import { exceedsContentLength, isRecord, MAX_JSON_REQUEST_BYTES, MAX_TOTAL_UPLOAD_BYTES, normalizePublicHttpUrls, readJsonWithLimit, validateFiles } from "@/lib/request-validation";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -43,37 +44,60 @@ function isWf10Available(): boolean {
  */
 export async function POST(req: NextRequest) {
   const contentType = req.headers.get("content-type") || "";
+  const multipart = contentType.toLowerCase().includes("multipart/form-data");
+  if (exceedsContentLength(req.headers.get("content-length"), multipart ? MAX_TOTAL_UPLOAD_BYTES + 2_000_000 : MAX_JSON_REQUEST_BYTES)) {
+    return Response.json({ error: "请求体超过允许大小" }, { status: 413 });
+  }
   let fileEntries: File[] = [];
-  let sourceUrls: string[] = [];
+  let sourceUrlsInput: unknown = [];
   let autoCollect = false;
-  let allowedDomains: string[] = [];
+  let allowedDomainsInput: unknown = [];
   let cutoffDate: string | null = null;
   let jobIdFromReq: string | null = null;
 
-  if (contentType.includes("multipart/form-data")) {
+  try {
+  if (multipart) {
     const formData = await req.formData();
-    fileEntries = formData.getAll("files") as File[];
+    fileEntries = formData.getAll("files").filter((value): value is File => value instanceof File);
     const sourceUrlsRaw = formData.get("source_urls") as string | null;
     const autoCollectRaw = formData.get("auto_collect") as string | null;
     const allowedDomainsRaw = formData.get("allowed_domains") as string | null;
     cutoffDate = formData.get("cutoff_date") as string | null;
     jobIdFromReq = formData.get("job_id") as string | null;
 
-    sourceUrls = sourceUrlsRaw ? JSON.parse(sourceUrlsRaw) : [];
+    sourceUrlsInput = sourceUrlsRaw ? JSON.parse(sourceUrlsRaw) : [];
     autoCollect = autoCollectRaw === "true";
-    allowedDomains = allowedDomainsRaw
+    allowedDomainsInput = allowedDomainsRaw
       ? allowedDomainsRaw.split(",").map((s) => s.trim()).filter(Boolean)
       : [];
   } else {
-    const body = await req.json();
-    sourceUrls = body.source_urls || [];
-    autoCollect = body.auto_collect || false;
-    allowedDomains = body.allowed_domains || [];
-    cutoffDate = body.cutoff_date || null;
-    jobIdFromReq = body.job_id || null;
+    const json = await readJsonWithLimit(req, MAX_JSON_REQUEST_BYTES);
+    if (!json.ok) return Response.json({ error: json.reason === "too_large" ? "请求体超过允许大小" : "请求内容格式无效" }, { status: json.reason === "too_large" ? 413 : 400 });
+    if (!isRecord(json.value)) return Response.json({ error: "请求内容必须是 JSON 对象" }, { status: 400 });
+    const body = json.value;
+    sourceUrlsInput = body.source_urls ?? [];
+    autoCollect = body.auto_collect === true;
+    allowedDomainsInput = typeof body.allowed_domains === "string"
+      ? body.allowed_domains.split(",").map((s: string) => s.trim()).filter(Boolean)
+      : body.allowed_domains ?? [];
+    cutoffDate = typeof body.cutoff_date === "string" ? body.cutoff_date : null;
+    jobIdFromReq = typeof body.job_id === "string" ? body.job_id : null;
+  }
+  } catch {
+    return Response.json({ error: "请求内容格式无效" }, { status: 400 });
   }
 
-  const jobId = jobIdFromReq || `JOB${Date.now()}`;
+  const fileError = validateFiles(fileEntries);
+  if (fileError) return Response.json({ error: fileError }, { status: 413 });
+  const validatedUrls = normalizePublicHttpUrls(sourceUrlsInput);
+  if (validatedUrls.error) return Response.json({ error: validatedUrls.error }, { status: 400 });
+  const sourceUrls = validatedUrls.urls;
+  if (!Array.isArray(allowedDomainsInput) || allowedDomainsInput.length > 50 || allowedDomainsInput.some((domain) => typeof domain !== "string" || domain.length > 253)) {
+    return Response.json({ error: "允许域名列表无效" }, { status: 400 });
+  }
+  const allowedDomains = allowedDomainsInput as string[];
+
+  const jobId = typeof jobIdFromReq === "string" ? jobIdFromReq.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || `JOB${Date.now()}` : `JOB${Date.now()}`;
 
   // 如果 WF10 未配置，走 Mock 模式
   if (!isWf10Available()) {
@@ -127,18 +151,18 @@ export async function POST(req: NextRequest) {
       method: "POST",
       headers,
       body: JSON.stringify(wf10Body),
+      signal: AbortSignal.any([req.signal, AbortSignal.timeout(120_000)]),
     });
 
     if (!wf10Res.ok || !wf10Res.body) {
-      const errText = await wf10Res.text().catch(() => "");
-      return sseError(`WF10 调用失败 (${wf10Res.status}): ${errText || "未知错误"}`);
+      return sseError(`WF10 调用失败（HTTP ${wf10Res.status}）`);
     }
 
     // 将 WF10 的 SSE 流翻译成前端协议事件
     return translateWf10Stream(wf10Res.body);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return sseError(`调用 WF10 异常: ${message}`);
+    console.error("WF10 request failed", err);
+    return sseError("调用 WF10 失败，请检查服务状态和服务器日志");
   }
 }
 

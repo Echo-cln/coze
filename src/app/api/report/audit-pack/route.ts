@@ -1,22 +1,26 @@
 import { NextRequest } from "next/server";
+import { exceedsContentLength, isRecord, MAX_JSON_REQUEST_BYTES, readJsonWithLimit } from "@/lib/request-validation";
 
 export const runtime = "nodejs";
 
 const MAX_REPORT_LENGTH = 1_000_000;
-const MAX_ITEMS = 20_000;
+const MAX_ITEMS = 10_000;
 
 /** Build a downloadable JSON audit artifact from the completed client-side job. */
 export async function POST(request: NextRequest) {
   try {
-    const contentLength = Number(request.headers.get("content-length") || 0);
-    if (contentLength > 8_000_000) {
+    if (exceedsContentLength(request.headers.get("content-length"), MAX_JSON_REQUEST_BYTES)) {
       return Response.json({ error: "审计包超过 8 MB 限制" }, { status: 413 });
     }
 
-    const body = await request.json();
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
+    const json = await readJsonWithLimit(request, MAX_JSON_REQUEST_BYTES);
+    if (!json.ok) {
+      return Response.json({ error: json.reason === "too_large" ? "审计包超过 8 MB 限制" : "请求内容格式无效" }, { status: json.reason === "too_large" ? 413 : 400 });
+    }
+    if (!isRecord(json.value)) {
       return Response.json({ error: "请求体必须是 JSON 对象" }, { status: 400 });
     }
+    const body = json.value;
 
     const report = typeof body.report === "string" ? body.report : "";
     const evidence = Array.isArray(body.evidence_ledger) ? body.evidence_ledger : [];

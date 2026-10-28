@@ -61,7 +61,7 @@ async function consumeSseStream(
     for (const block of blocks) {
       const lines = block.split(/\r?\n/).filter((l) => l.trim());
       let eventName = "";
-      let dataLines: string[] = [];
+      const dataLines: string[] = [];
 
       for (const line of lines) {
         if (line.startsWith("event:")) {
@@ -84,7 +84,7 @@ async function consumeSseStream(
   if (buffer.trim()) {
     const lines = buffer.split(/\r?\n/).filter((l) => l.trim());
     let eventName = "";
-    let dataLines: string[] = [];
+    const dataLines: string[] = [];
     for (const line of lines) {
       if (line.startsWith("event:")) {
         eventName = line.slice(6).trim();

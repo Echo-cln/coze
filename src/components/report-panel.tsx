@@ -48,6 +48,7 @@ import {
   SEVERITY_LABELS,
   EVIDENCE_TYPE_LABELS,
 } from "@/lib/types";
+import { renderInlineSafe as renderInline } from "@/lib/safe-markdown";
 
 interface ReportPanelProps {
   steps: WorkflowStep[];
@@ -281,30 +282,6 @@ function renderMarkdown(text: string) {
   return elements;
 }
 
-// 渲染行内元素（粗体、引用标记）
-function renderInline(text: string): string {
-  let html = text
-    // 先处理通用 Markdown 链接 [text](url)，排除 [E1]/[C1] 这种证据标签（它们没有括号跟随）
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
-      // 锚点链接（#开头）不需要 target=_blank
-      if (url.startsWith("#")) {
-        return `<a href="${url}" class="text-indigo-600 dark:text-indigo-400 hover:underline">${label}</a>`;
-      }
-      return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 dark:text-indigo-400 hover:underline">${label}</a>`;
-    })
-    .replace(/\*\*(.+?)\*\*/g, '<strong class="text-slate-800 dark:text-slate-200">$1</strong>')
-    .replace(/`(.+?)`/g, '<code class="bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded text-[11px] font-mono">$1</code>')
-    .replace(
-      /\[E(\d+)\]/g,
-      '<span class="inline-flex items-center px-1 py-0.5 mx-0.5 text-[10px] font-mono text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 rounded border border-indigo-100 dark:border-indigo-900/50 cursor-pointer hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition-colors">E$1</span>'
-    )
-    .replace(
-      /\[C(\d+)\]/g,
-      '<span class="inline-flex items-center px-1 py-0.5 mx-0.5 text-[10px] font-mono text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 rounded border border-amber-100 dark:border-amber-900/50 cursor-pointer">C$1</span>'
-    );
-  return html;
-}
-
 // ===== 质量仪表盘组件 =====
 function QualityGauge({
   label,
@@ -445,7 +422,7 @@ function EvidenceCard({ item }: { item: EvidenceItem }) {
           <div>
             <div className="text-[11px] text-slate-400 mb-1">原文摘录：</div>
             <blockquote className="text-[11px] text-slate-600 dark:text-slate-400 bg-white dark:bg-slate-950/60 border-l-2 border-indigo-300 dark:border-indigo-700 pl-2.5 py-1.5 rounded-r font-serif italic">
-              "{item.quote}"
+              “{item.quote}”
             </blockquote>
           </div>
         </div>
@@ -660,7 +637,7 @@ export function ReportPanel({
           {hasAnyMaterial && !hasReadyMaterial && !isParsing && (
             <p className="text-xs text-amber-600 dark:text-amber-500 flex items-center gap-1">
               <AlertCircle className="h-3.5 w-3.5" />
-              点击"开始解析"处理材料后再生成报告
+              点击“开始解析”处理材料后再生成报告
             </p>
           )}
           {isParsing && (
@@ -774,7 +751,7 @@ export function ReportPanel({
                       <FileText className="h-12 w-12 mb-3 opacity-30" />
                       <p className="text-sm">报告尚未生成</p>
                       <p className="text-xs mt-1 text-slate-500">
-                        上传材料、解析后点击"生成报告"
+                        上传材料、解析后点击“生成报告”
                       </p>
                     </div>
                   )}

@@ -12,6 +12,8 @@ import {
   isStorageAvailable,
 } from "@/lib/storage";
 import { evaluateReportQuality } from "@/lib/quality";
+import { exceedsContentLength, isRecord, MAX_JSON_REQUEST_BYTES, MAX_TOTAL_UPLOAD_BYTES, normalizePublicHttpUrls, readJsonWithLimit, validateFiles } from "@/lib/request-validation";
+import { escapeHtml } from "@/lib/safe-markdown";
 
 export const runtime = "nodejs";
 export const maxDuration = 900; // 长任务
@@ -41,6 +43,10 @@ export const maxDuration = 900; // 长任务
 export async function POST(req: NextRequest) {
   const startedAt = Date.now();
   const contentType = req.headers.get("content-type") || "";
+  const multipart = contentType.toLowerCase().includes("multipart/form-data");
+  if (exceedsContentLength(req.headers.get("content-length"), multipart ? MAX_TOTAL_UPLOAD_BYTES + 2_000_000 : MAX_JSON_REQUEST_BYTES)) {
+    return Response.json({ error: "请求体超过允许大小" }, { status: 413 });
+  }
   let jobId = `JOB_${Date.now()}`;
   let industry = "finance";
   let templateId = "finance_v1";
@@ -49,13 +55,14 @@ export async function POST(req: NextRequest) {
   let cutoffDate = "";
   let strictMode = false;
   let parsedChunks: unknown = null;
-  let sourceUrls: string[] = [];
+  let sourceUrlsInput: unknown = [];
   let fileEntries: File[] = [];
   let kbQuery = "";
   let kbBackend = "local";
   let kbTopK = 10;
 
-  if (contentType.includes("multipart/form-data")) {
+  try {
+  if (multipart) {
     const formData = await req.formData();
     jobId = (formData.get("job_id") as string) || jobId;
     industry = (formData.get("industry") as string) || industry;
@@ -69,7 +76,7 @@ export async function POST(req: NextRequest) {
     parsedChunks = parsedChunksStr ? JSON.parse(parsedChunksStr) : null;
 
     const sourceUrlsStr = formData.get("source_urls") as string;
-    sourceUrls = sourceUrlsStr ? JSON.parse(sourceUrlsStr) : [];
+    sourceUrlsInput = sourceUrlsStr ? JSON.parse(sourceUrlsStr) : [];
 
     kbQuery = (formData.get("kb_query") as string) || "";
     kbBackend = (formData.get("kb_backend") as string) || "local";
@@ -82,21 +89,40 @@ export async function POST(req: NextRequest) {
       }
     }
   } else {
-    const body = await req.json();
-    jobId = body.job_id || jobId;
-    industry = body.industry || industry;
-    templateId = body.template_id || templateId;
-    audience = body.audience || audience;
-    decisionQuestion = body.decision_question || "";
-    cutoffDate = body.cutoff_date || "";
-    strictMode = body.strict_mode || false;
-    parsedChunks = body.parsed_chunks || null;
-    sourceUrls = body.source_urls || [];
-    kbQuery = body.kb_query || "";
-    kbBackend = body.kb_backend || "local";
-    kbTopK = body.kb_top_k || 10;
+    const json = await readJsonWithLimit(req, MAX_JSON_REQUEST_BYTES);
+    if (!json.ok) return Response.json({ error: json.reason === "too_large" ? "请求体超过允许大小" : "请求内容格式无效" }, { status: json.reason === "too_large" ? 413 : 400 });
+    if (!isRecord(json.value)) return Response.json({ error: "请求内容必须是 JSON 对象" }, { status: 400 });
+    const body = json.value;
+    jobId = typeof body.job_id === "string" ? body.job_id : jobId;
+    industry = typeof body.industry === "string" ? body.industry : industry;
+    templateId = typeof body.template_id === "string" ? body.template_id : templateId;
+    audience = typeof body.audience === "string" ? body.audience : audience;
+    decisionQuestion = typeof body.decision_question === "string" ? body.decision_question : "";
+    cutoffDate = typeof body.cutoff_date === "string" ? body.cutoff_date : "";
+    strictMode = body.strict_mode === true;
+    parsedChunks = body.parsed_chunks ?? null;
+    sourceUrlsInput = body.source_urls ?? [];
+    kbQuery = typeof body.kb_query === "string" ? body.kb_query : "";
+    kbBackend = typeof body.kb_backend === "string" ? body.kb_backend : "local";
+    kbTopK = typeof body.kb_top_k === "number" ? body.kb_top_k : 10;
     fileEntries = []; // JSON 模式不支持文件上传
   }
+  } catch {
+    return Response.json({ error: "请求内容格式无效" }, { status: 400 });
+  }
+
+  const fileError = validateFiles(fileEntries);
+  if (fileError) return Response.json({ error: fileError }, { status: 413 });
+  const validatedUrls = normalizePublicHttpUrls(sourceUrlsInput);
+  if (validatedUrls.error) return Response.json({ error: validatedUrls.error }, { status: 400 });
+  const sourceUrls = validatedUrls.urls;
+  if (typeof decisionQuestion !== "string" || decisionQuestion.length > 10_000) {
+    return Response.json({ error: "分析问题超过 10000 字符限制" }, { status: 400 });
+  }
+  if (typeof parsedChunks === "string" && parsedChunks.length > MAX_JSON_REQUEST_BYTES) {
+    return Response.json({ error: "解析切片超过允许大小" }, { status: 413 });
+  }
+  jobId = jobId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || `JOB_${Date.now()}`;
 
   const encoder = new TextEncoder();
   let progressStep = 0;
@@ -132,7 +158,7 @@ export async function POST(req: NextRequest) {
         }
 
         // —— 真实模式：调用 C 模块 ——
-        let cInput: Record<string, unknown> = {
+        const cInput: Record<string, unknown> = {
           job_id: jobId,
           decision_question: decisionQuestion,
           max_files: 20,
@@ -221,14 +247,11 @@ export async function POST(req: NextRequest) {
               : {}),
           },
           body: JSON.stringify(cInput),
-          signal: req.signal,
+          signal: AbortSignal.any([req.signal, AbortSignal.timeout(900_000)]),
         });
 
         if (!resp.ok || !resp.body) {
-          const text = await resp.text().catch(() => "");
-          throw new Error(
-            `C 模块调用失败 (${resp.status}): ${text.slice(0, 200)}`,
-          );
+          throw new Error(`C 模块调用失败（HTTP ${resp.status}）`);
         }
 
         // 消费 SSE
@@ -236,8 +259,8 @@ export async function POST(req: NextRequest) {
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
         let allSources: SourceRegistry[] = [];
-        let allEvidence: EvidenceItem[] = [];
-        let allConflicts: ConflictItem[] = [];
+        const allEvidence: EvidenceItem[] = [];
+        const allConflicts: ConflictItem[] = [];
         let finalReport = "";
         let finalOutput: CModuleOutput | null = null;
 
@@ -358,7 +381,7 @@ export async function POST(req: NextRequest) {
 
         // 计算失败来源和质量指标
         const allFailed = allSources.filter((s) => s.parse_status === "failed");
-        let wf60FinalOutput: any = null;
+        let wf60FinalOutput: WF60Output | null = null;
         // 步骤 2 完成 → 步骤 3：大纲与撰写
         controller.enqueue(sendEvent("progress", { step: 2, label: stepNames[2], status: "completed" }));
         controller.enqueue(sendEvent("progress", { step: 3, label: stepNames[3], status: "running" }));
@@ -459,27 +482,28 @@ export async function POST(req: NextRequest) {
                   quote: e.quote || "",
                   confidence: typeof e.confidence === "number" ? e.confidence : 0.8,
                 })),
-                conflicts: allConflicts.map((c: any) => ({
+                conflicts: allConflicts.map((c) => ({
                   conflict_id: c.conflict_id,
                   severity: c.severity,
                   conflict_type: c.conflict_type,
                   title: c.summary || c.conflict_type,
-                  parties: c.parties || c.evidence_ids || [],
+                  parties: c.evidence_ids,
                   description: c.explanation || c.summary || "",
-                  handling: c.resolution_suggestion || "",
-                  status: c.status || c.resolution_status || "open",
+                  handling: c.resolution || "",
+                  status: c.resolved ? "resolved" : "open",
                 })),
-                failed_sources: allFailed.map((s: any) => s.file_name || s.source_id || ""),
+                failed_sources: allFailed.map((s) => s.file_name || s.source_id || ""),
                 quality: metrics,
                 report_markdown: finalReport,
               }),
+              signal: AbortSignal.any([req.signal, AbortSignal.timeout(120_000)]),
             });
 
             if (wf60Resp.ok) {
               const wf60Reader = wf60Resp.body!.getReader();
               const wf60Decoder = new TextDecoder();
               let wf60Buffer = "";
-              let wf60Output: any = null;
+              let wf60Output: WF60Output | null = null;
 
               while (true) {
                 const { value, done: wf60Done } = await wf60Reader.read();
@@ -501,7 +525,7 @@ export async function POST(req: NextRequest) {
                       try {
                         const msg = JSON.parse(eventData);
                         if (msg.type === "workflow_end" && msg.output) {
-                          wf60Output = msg.output;
+                          wf60Output = msg.output as WF60Output;
                         }
                       } catch {}
                     }
@@ -511,7 +535,7 @@ export async function POST(req: NextRequest) {
                 }
               }
 
-              wf60FinalOutput = wf60Output as any;
+              wf60FinalOutput = wf60Output;
             }
           } catch (err) {
             console.warn("WF60 call failed:", err);
@@ -524,24 +548,31 @@ export async function POST(req: NextRequest) {
         controller.enqueue(sendEvent("progress", { step: 5, label: stepNames[5], status: "running" }));
 
         // 标准化 WF60 导出链接（download_areas 可能是数组或对象）
-        const normalizeExportUrls = (wfOutput: any): { pdf?: string; docx?: string; markdown?: string } => {
-          if (!wfOutput?.export_result?.download_areas) return {};
-          const areas = wfOutput.export_result.download_areas;
+        const normalizeExportUrls = (wfOutput: WF60Output | null): { pdf?: string; docx?: string; markdown?: string } => {
+          const areas: unknown = wfOutput?.export_result?.download_areas;
           const result: { pdf?: string; docx?: string; markdown?: string } = {};
           if (Array.isArray(areas)) {
             for (const area of areas) {
-              const url = area.url || area.download_url || area.file_url;
-              const type = (area.type || area.format || area.name || "").toString().toLowerCase();
+              if (!area || typeof area !== "object") continue;
+              const item = area as Record<string, unknown>;
+              const url = item.url || item.download_url || item.file_url;
+              const type = String(item.type || item.format || item.name || "").toLowerCase();
               if (!url) continue;
+              if (typeof url !== "string") continue;
               if (type.includes("pdf")) result.pdf = url;
               else if (type.includes("doc") || type.includes("word")) result.docx = url;
               else if (type.includes("md") || type.includes("markdown")) result.markdown = url;
             }
           } else if (typeof areas === "object" && areas !== null) {
-            if (areas.pdf) result.pdf = areas.pdf.url || areas.pdf;
-            if (areas.docx) result.docx = areas.docx.url || areas.docx;
-            if (areas.word && !result.docx) result.docx = areas.word.url || areas.word;
-            if (areas.markdown) result.markdown = areas.markdown.url || areas.markdown;
+            const entries = areas as Record<string, unknown>;
+            const asUrl = (value: unknown): string | undefined => {
+              if (typeof value === "string") return value;
+              if (value && typeof value === "object" && "url" in value && typeof value.url === "string") return value.url;
+              return undefined;
+            };
+            result.pdf = asUrl(entries.pdf);
+            result.docx = asUrl(entries.docx) || asUrl(entries.word);
+            result.markdown = asUrl(entries.markdown);
           }
           return result;
         };
@@ -580,7 +611,8 @@ export async function POST(req: NextRequest) {
 
         controller.close();
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        console.error("Report generation failed", err);
+        const message = "报告生成失败，请检查输入或稍后重试；详细信息已记录在服务端日志中。";
         controller.enqueue(
           encoder.encode(
             `event: error\ndata: ${JSON.stringify({ message })}\n\n`,
@@ -618,7 +650,7 @@ interface ReportSection {
  */
 function buildSectionsFromEvidence(
   evidences: EvidenceItem[],
-  conflicts: any[],
+  conflicts: ConflictItem[],
   decisionQuestion: string,
   industry: string,
   audience: string,
@@ -756,8 +788,8 @@ function buildSectionsFromEvidence(
             analysisMd += ` 其中最大值与最小值相差 **${diffPct}%**，`;
           }
 
-          const hasConflict = conflicts.some((c: any) =>
-            c.evidence_ids?.some((id: string) => numericItems.some((ni) => ni.evidence_id === id)),
+          const hasConflict = conflicts.some((c) =>
+            c.evidence_ids.some((id) => numericItems.some((ni) => ni.evidence_id === id)),
           );
           if (hasConflict) {
             analysisMd += "不同来源数据存在口径差异（详见「冲突与口径差异」章节），建议以高权威来源为准或人工核验后引用。";
@@ -1089,7 +1121,7 @@ function buildSectionsFromEvidence(
  * 从结构化章节拼接完整 Markdown 报告（WF60 不可用时的降级方案）
  */
 function buildReportFromSections(
-  sections: any[],
+  sections: ReportSection[],
   decisionQuestion: string,
   industry: string,
 ): string {
@@ -1339,7 +1371,7 @@ async function generateExportFiles(
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>${title}</title>
+<title>${escapeHtml(title)}</title>
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.8; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #1a1a2e; background: #fff; }
 h1 { font-size: 28px; border-bottom: 3px solid #4f46e5; padding-bottom: 12px; margin-top: 40px; }
@@ -1363,7 +1395,7 @@ code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: "
 </head>
 <body>
 <div class="report-header">
-<h1>${title}</h1>
+<h1>${escapeHtml(title)}</h1>
 <div class="report-meta">生成时间：${new Date().toLocaleString("zh-CN")} ｜ 证衡 EvidenceOS</div>
 </div>
 `;
@@ -1749,7 +1781,7 @@ async function runMockGeneration(params: {
           topic: "行业趋势",
         },
       ];
-      const mockConflictsForReport = [
+      const mockConflictsForReport: ConflictItem[] = [
         {
           conflict_id: "CF001",
           evidence_ids: ["E000004", "E000005"],

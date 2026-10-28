@@ -127,6 +127,11 @@ export interface ConflictItem {
   resolution?: Resolution;
   resolved: boolean;
   summary: string; // 一句话描述
+  // Optional aliases accepted from the external workflow adapter.
+  title?: string;
+  description?: string;
+  handling?: string;
+  status?: string;
 }
 
 export interface WorkflowStep {

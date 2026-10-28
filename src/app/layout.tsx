@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import { Inspector } from 'react-dev-inspector';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -57,12 +56,9 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const isDev = process.env.COZE_PROJECT_ENV === 'DEV';
-
   return (
-    <html lang="en">
+    <html lang="zh-CN">
       <body className={`antialiased`}>
-        {isDev && <Inspector />}
         {children}
       </body>
     </html>
