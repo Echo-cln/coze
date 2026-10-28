@@ -1,64 +1,61 @@
 import { NextRequest } from "next/server";
-import { isCozeConfigured } from "@/lib/coze-client";
+import { exceedsContentLength, isRecord, MAX_JSON_REQUEST_BYTES, readJsonWithLimit } from "@/lib/request-validation";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 
-/**
- * GET /api/report/audit-pack?job_id=xxx
- *
- * 下载审计包（ZIP 或 JSON 合集）
- * 包含：报告正文、证据台账、冲突清单、解析清单、质量报告
- *
- * 当 Coze 未配置时，从前端传来的数据中直接组装本地演示版
- */
-export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const jobId = searchParams.get("job_id");
+const MAX_REPORT_LENGTH = 1_000_000;
+const MAX_ITEMS = 10_000;
 
-  if (!isCozeConfigured()) {
-    // 演示模式：返回一个示例审计包 JSON
-    const demoPack = {
-      job_id: jobId || "demo_job",
+/** Build a downloadable JSON audit artifact from the completed client-side job. */
+export async function POST(request: NextRequest) {
+  try {
+    if (exceedsContentLength(request.headers.get("content-length"), MAX_JSON_REQUEST_BYTES)) {
+      return Response.json({ error: "审计包超过 8 MB 限制" }, { status: 413 });
+    }
+
+    const json = await readJsonWithLimit(request, MAX_JSON_REQUEST_BYTES);
+    if (!json.ok) {
+      return Response.json({ error: json.reason === "too_large" ? "审计包超过 8 MB 限制" : "请求内容格式无效" }, { status: json.reason === "too_large" ? 413 : 400 });
+    }
+    if (!isRecord(json.value)) {
+      return Response.json({ error: "请求体必须是 JSON 对象" }, { status: 400 });
+    }
+    const body = json.value;
+
+    const report = typeof body.report === "string" ? body.report : "";
+    const evidence = Array.isArray(body.evidence_ledger) ? body.evidence_ledger : [];
+    const conflicts = Array.isArray(body.conflict_register) ? body.conflict_register : [];
+    const sources = Array.isArray(body.source_registry) ? body.source_registry : [];
+
+    if (report.length > MAX_REPORT_LENGTH || evidence.length > MAX_ITEMS || conflicts.length > MAX_ITEMS || sources.length > MAX_ITEMS) {
+      return Response.json({ error: "审计包字段超过允许大小" }, { status: 413 });
+    }
+    if (!report && evidence.length === 0 && conflicts.length === 0 && sources.length === 0) {
+      return Response.json({ error: "没有可导出的报告或审计数据" }, { status: 400 });
+    }
+
+    const rawJobId = typeof body.job_id === "string" ? body.job_id : "report";
+    const jobId = rawJobId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "report";
+    const pack = {
+      schema_version: "1.0.0",
+      job_id: jobId,
       generated_at: new Date().toISOString(),
-      version: "1.0.0",
-      files: {
-        "report.md": {
-          content_type: "text/markdown",
-          description: "专业报告正文",
-        },
-        "evidence_ledger.json": {
-          content_type: "application/json",
-          description: "证据台账",
-        },
-        "conflict_register.json": {
-          content_type: "application/json",
-          description: "冲突清单",
-        },
-        "parse_manifest.md": {
-          content_type: "text/markdown",
-          description: "解析清单",
-        },
-        "quality_report.json": {
-          content_type: "application/json",
-          description: "质量报告",
-        },
-      },
-      note: "此为本地演示版本。配置 Coze 工作流后，将返回真实审计包数据。",
+      report_markdown: report,
+      evidence_ledger: evidence,
+      conflict_register: conflicts,
+      source_registry: sources,
+      quality_metrics: body.quality_metrics ?? null,
     };
 
-    return new Response(JSON.stringify(demoPack, null, 2), {
+    return new Response(JSON.stringify(pack, null, 2), {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
-        "Content-Disposition": `attachment; filename="audit_pack_${jobId || "demo"}.json"`,
+        "Content-Disposition": `attachment; filename="audit_pack_${jobId}.json"`,
+        "Cache-Control": "no-store",
       },
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "无效的请求体";
+    return Response.json({ error: `审计包生成失败：${message}` }, { status: 400 });
   }
-
-  // 真实模式：TODO 调用工作流结果接口获取完整审计包
-  return new Response(
-    JSON.stringify({
-      error: "完整审计包导出需在工作流 WF60 中实现",
-    }),
-    { status: 501 },
-  );
 }

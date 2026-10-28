@@ -1,363 +1,216 @@
-# projects
+# EvidenceOS
 
-这是一个基于 [Next.js 16](https://nextjs.org) + [shadcn/ui](https://ui.shadcn.com) 的全栈应用项目，由扣子编程 CLI 创建。
+### 可追溯的智能报告工作台
 
-## 快速开始
+**从多源材料到证据台账、冲突清单和可审计报告。**
 
-### 启动开发服务器
+EvidenceOS 是一个面向金融研究、政策汇报和咨询分析场景的报告工作台原型。它把材料解析、事实抽取、冲突识别、报告生成与交付串成一条可观察的流程，让报告中的关键判断尽可能回到来源和原文。
 
-```bash
-coze-dev dev
+> **项目状态：Beta / 研究原型。** Web 工作台和 API 接入层已提交；真实解析与生成依赖单独部署的 Coze 工作流。未配置服务时，应用会进入演示模式。当前仓库没有发布可复现的准确率基准，也没有包含可导入的 Coze 工作流定义。
+
+---
+
+## 产品预览
+
+![EvidenceOS 工作台：证据与冲突视图](assets/image_20260913235536546.png)
+
+![EvidenceOS 工作台：报告预览](assets/image_20260914000728845.png)
+
+---
+
+## 为什么做 EvidenceOS
+
+传统的“上传材料 → 让模型写报告”很难回答几个关键问题：
+
+- 结论来自哪份材料、哪一页、哪段原文？
+- 两份材料的数值不同，是统计范围不同，还是确实互相矛盾？
+- 报告引用是否能回到证据台账，未解决的风险是否被清楚标出？
+
+EvidenceOS 将**证据可追溯**与**冲突可解释**作为报告链路的核心约束。目标不是让文本看起来更长，而是让使用者能检查报告依据、发现资料缺口并判断哪些结论仍需人工核验。
+
+## 核心能力
+
+- **多源材料入口**：支持上传文件与在线来源；解析工作流返回来源清单和文本切片。
+- **结构化事实台账**：围绕主体、指标、数值、单位、期间、范围、原文和定位组织证据。
+- **分层冲突识别**：将硬规则检测与语义判断拆开，保留冲突所关联的证据。
+- **流式任务反馈**：后端以 SSE 传递进度、证据、冲突、正文和最终结果。
+- **行业化报告工作台**：提供金融投研、政务汇报和咨询调研模板配置，以及报告、证据地图、冲突雷达和质量视图。
+- **审计包导出**：将报告正文、证据台账、冲突清单、来源状态和完整性检查结果打包为可下载 JSON。
+
+## 架构一览
+
+`WF10`、`C 模块` 和 `WF60` 是外部工作流服务，通过环境变量配置。Web 应用负责接收用户输入、转发任务、翻译 SSE 事件并呈现结果。
+
+```mermaid
+flowchart LR
+    U["用户材料与分析问题"] --> W["Next.js 工作台"]
+    W --> P["/api/report/parse"]
+    P --> WF10["WF10 材料解析"]
+    WF10 -->|parsed_chunks| C["C 模块：证据抽取与冲突检测"]
+    W -->|知识库检索词或文件| C
+    C --> L["报告生成与引用校验"]
+    L --> WF60["WF60 渲染与导出（可选）"]
+    L --> R["报告、证据台账、冲突清单"]
 ```
 
-启动后，在浏览器中打开 [http://localhost:5000](http://localhost:5000) 查看应用。
+### 你负责的模块：证据抽取与冲突检测
 
-开发服务器支持热更新，修改代码后页面会自动刷新。
+C 模块承接解析切片或知识库检索结果，产出可供报告生成使用的结构化证据与冲突结果。流程图中的职责边界如下：
 
-### 构建生产版本
+1. **数据入口路由**：在文档切片与知识库检索结果之间选择输入路径，并汇入统一处理链路。
+2. **文档切片**：将长材料整理为可处理片段。切片粒度、重叠策略以及页码/段落定位应以实际 Coze 节点配置为准。
+3. **事实抽取**：从片段中提取事实，并绑定来源与原文。项目的数据契约还定义了主体、谓词、数值、单位、期间、范围、定位和置信度等字段。
+4. **归一化与去重**：统一可比较字段并合并重复事实；去重时应保留各来源的出处，避免丢失证据链。
+5. **硬冲突规则检测**：在主体、指标、期间和统计范围可比时，识别数值或口径差异。
+6. **语义冲突判定**：补充规则难以覆盖的文本矛盾判断，并说明涉及的事实与判定理由。
+7. **冲突合并与统计**：合并重复冲突，关联证据 ID，汇总类型和风险等级后输出。
 
-```bash
-coze-dev build
-```
+**证据台账是模块输出的关键接口。** 每条事实应尽可能包含 `evidence_id`、`source_id`、`subject`、`predicate`、`value`、`unit`、`period`、`scope`、`quote`、`locator` 和 `confidence`。冲突清单应关联 `evidence_ids`，让用户可以从“存在差异”继续追到差异双方的原始依据。
 
-### 启动生产服务器
+> 上述流程节点来自项目中的工作流图与数据契约说明。具体提示词、规则阈值、模型配置和节点级评测尚未随仓库发布；README 不将这些未公开配置表述为已经验证的实现细节。
 
-```bash
-coze-dev start
-```
+## 你负责的模块：设计与评测
 
-## 项目结构
-
-```
-src/
-├── app/                      # Next.js App Router 目录
-│   ├── layout.tsx           # 根布局组件
-│   ├── page.tsx             # 首页
-│   ├── globals.css          # 全局样式（包含 shadcn 主题变量）
-│   └── [route]/             # 其他路由页面
-├── components/              # React 组件目录
-│   └── ui/                  # shadcn/ui 基础组件（优先使用）
-│       ├── button.tsx
-│       ├── card.tsx
-│       └── ...
-├── lib/                     # 工具函数库
-│   └── utils.ts            # cn() 等工具函数
-└── hooks/                   # 自定义 React Hooks（可选）
-
-server/
-├── index.ts                 # 自定义服务器入口
-├── tsconfig.json           # Server TypeScript 配置
-└── dist/                    # 编译输出目录（自动生成）
-```
-
-## 核心开发规范
-
-### 1. 组件开发
-
-**优先使用 shadcn/ui 基础组件**
-
-本项目已预装完整的 shadcn/ui 组件库，位于 `src/components/ui/` 目录。开发时应优先使用这些组件作为基础：
-
-```tsx
-// ✅ 推荐：使用 shadcn 基础组件
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-
-export default function MyComponent() {
-  return (
-    <Card>
-      <CardHeader>标题</CardHeader>
-      <CardContent>
-        <Input placeholder="输入内容" />
-        <Button>提交</Button>
-      </CardContent>
-    </Card>
-  );
-}
-```
-
-**可用的 shadcn 组件清单**
-
-- 表单：`button`, `input`, `textarea`, `select`, `checkbox`, `radio-group`, `switch`, `slider`
-- 布局：`card`, `separator`, `tabs`, `accordion`, `collapsible`, `scroll-area`
-- 反馈：`alert`, `alert-dialog`, `dialog`, `toast`, `sonner`, `progress`
-- 导航：`dropdown-menu`, `menubar`, `navigation-menu`, `context-menu`
-- 数据展示：`table`, `avatar`, `badge`, `hover-card`, `tooltip`, `popover`
-- 其他：`calendar`, `command`, `carousel`, `resizable`, `sidebar`
-
-详见 `src/components/ui/` 目录下的具体组件实现。
-
-### 2. 路由开发
-
-Next.js 使用文件系统路由，在 `src/app/` 目录下创建文件夹即可添加路由：
-
-```bash
-# 创建新路由 /about
-src/app/about/page.tsx
-
-# 创建动态路由 /posts/[id]
-src/app/posts/[id]/page.tsx
-
-# 创建路由组（不影响 URL）
-src/app/(marketing)/about/page.tsx
-
-# 创建 API 路由
-src/app/api/users/route.ts
-```
-
-**页面组件示例**
-
-```tsx
-// src/app/about/page.tsx
-import { Button } from '@/components/ui/button';
-
-export const metadata = {
-  title: '关于我们',
-  description: '关于页面描述',
-};
-
-export default function AboutPage() {
-  return (
-    <div>
-      <h1>关于我们</h1>
-      <Button>了解更多</Button>
-    </div>
-  );
-}
-```
-
-**动态路由示例**
-
-```tsx
-// src/app/posts/[id]/page.tsx
-export default async function PostPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = await params;
-
-  return <div>文章 ID: {id}</div>;
-}
-```
-
-**API 路由示例**
-
-```tsx
-// src/app/api/users/route.ts
-import { NextResponse } from 'next/server';
-
-export async function GET() {
-  return NextResponse.json({ users: [] });
-}
-
-export async function POST(request: Request) {
-  const body = await request.json();
-  return NextResponse.json({ success: true });
-}
-```
-
-### 3. 依赖管理
-
-**必须使用 pnpm 管理依赖**
-
-```bash
-# ✅ 安装依赖
-pnpm install
-
-# ✅ 添加新依赖
-pnpm add package-name
-
-# ✅ 添加开发依赖
-pnpm add -D package-name
-
-# ❌ 禁止使用 npm 或 yarn
-# npm install  # 错误！
-# yarn add     # 错误！
-```
-
-项目已配置 `preinstall` 脚本，使用其他包管理器会报错。
-
-### 4. 样式开发
-
-**使用 Tailwind CSS v4**
-
-本项目使用 Tailwind CSS v4 进行样式开发，并已配置 shadcn 主题变量。
-
-```tsx
-// 使用 Tailwind 类名
-<div className="flex items-center gap-4 p-4 rounded-lg bg-background">
-  <Button className="bg-primary text-primary-foreground">
-    主要按钮
-  </Button>
-</div>
-
-// 使用 cn() 工具函数合并类名
-import { cn } from '@/lib/utils';
-
-<div className={cn(
-  "base-class",
-  condition && "conditional-class",
-  className
-)}>
-  内容
-</div>
-```
-
-**主题变量**
-
-主题变量定义在 `src/app/globals.css` 中，支持亮色/暗色模式：
-
-- `--background`, `--foreground`
-- `--primary`, `--primary-foreground`
-- `--secondary`, `--secondary-foreground`
-- `--muted`, `--muted-foreground`
-- `--accent`, `--accent-foreground`
-- `--destructive`, `--destructive-foreground`
-- `--border`, `--input`, `--ring`
-
-### 5. 表单开发
-
-推荐使用 `react-hook-form` + `zod` 进行表单开发：
-
-```tsx
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import * as z from 'zod';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-
-const formSchema = z.object({
-  username: z.string().min(2, '用户名至少 2 个字符'),
-  email: z.string().email('请输入有效的邮箱'),
-});
-
-export default function MyForm() {
-  const form = useForm({
-    resolver: zodResolver(formSchema),
-    defaultValues: { username: '', email: '' },
-  });
-
-  const onSubmit = (data: z.infer<typeof formSchema>) => {
-    console.log(data);
-  };
-
-  return (
-    <form onSubmit={form.handleSubmit(onSubmit)}>
-      <Input {...form.register('username')} />
-      <Input {...form.register('email')} />
-      <Button type="submit">提交</Button>
-    </form>
-  );
-}
-```
-
-### 6. 数据获取
-
-**服务端组件（推荐）**
-
-```tsx
-// src/app/posts/page.tsx
-async function getPosts() {
-  const res = await fetch('https://api.example.com/posts', {
-    cache: 'no-store', // 或 'force-cache'
-  });
-  return res.json();
-}
-
-export default async function PostsPage() {
-  const posts = await getPosts();
-
-  return (
-    <div>
-      {posts.map(post => (
-        <div key={post.id}>{post.title}</div>
-      ))}
-    </div>
-  );
-}
-```
-
-**客户端组件**
-
-```tsx
-'use client';
-
-import { useEffect, useState } from 'react';
-
-export default function ClientComponent() {
-  const [data, setData] = useState(null);
-
-  useEffect(() => {
-    fetch('/api/data')
-      .then(res => res.json())
-      .then(setData);
-  }, []);
-
-  return <div>{JSON.stringify(data)}</div>;
-}
-```
-
-## 常见开发场景
-
-### 添加新页面
-
-1. 在 `src/app/` 下创建文件夹和 `page.tsx`
-2. 使用 shadcn 组件构建 UI
-3. 根据需要添加 `layout.tsx` 和 `loading.tsx`
-
-### 创建业务组件
-
-1. 在 `src/components/` 下创建组件文件（非 UI 组件）
-2. 优先组合使用 `src/components/ui/` 中的基础组件
-3. 使用 TypeScript 定义 Props 类型
-
-### 添加全局状态
-
-推荐使用 React Context 或 Zustand：
-
-```tsx
-// src/lib/store.ts
-import { create } from 'zustand';
-
-interface Store {
-  count: number;
-  increment: () => void;
-}
-
-export const useStore = create<Store>((set) => ({
-  count: 0,
-  increment: () => set((state) => ({ count: state.count + 1 })),
-}));
-```
-
-### 集成数据库
-
-推荐使用 Prisma 或 Drizzle ORM，在 `src/lib/db.ts` 中配置。
+节点职责、证据字段契约、归一化边界、冲突判定策略和建议评测集整理在 [证据流水线设计与评测计划](docs/evidence-pipeline.md)。文档明确区分仓库已确认的接口与仍需在 Coze 工作流中实现和验证的设计建议，便于把流程图进一步变成可复现、可评测的工程模块。
 
 ## 技术栈
 
-- **框架**: Next.js 16.1.1 (App Router)
-- **UI 组件**: shadcn/ui (基于 Radix UI)
-- **样式**: Tailwind CSS v4
-- **表单**: React Hook Form + Zod
-- **图标**: Lucide React
-- **字体**: Geist Sans & Geist Mono
-- **包管理器**: pnpm 9+
-- **TypeScript**: 5.x
+| 层 | 技术 |
+|---|---|
+| Web 应用 | Next.js App Router、React、TypeScript |
+| UI | Tailwind CSS、shadcn/ui、Radix UI |
+| 流式接口 | Server-Sent Events（SSE） |
+| 工作流 | Coze 工作流 HTTP 接口；WF10 / C 模块 / WF60 独立配置 |
+| 文件对象存储 | Coze SDK S3Storage 适配层（可选） |
+| 包管理 | pnpm |
 
-## 参考文档
+## 本地运行
 
-- [Next.js 官方文档](https://nextjs.org/docs)
-- [shadcn/ui 组件文档](https://ui.shadcn.com)
-- [Tailwind CSS 文档](https://tailwindcss.com/docs)
-- [React Hook Form](https://react-hook-form.com)
+### 环境要求
 
-## 重要提示
+- Node.js 20.19+
+- pnpm 11.25+
 
-1. **必须使用 pnpm** 作为包管理器
-2. **优先使用 shadcn/ui 组件** 而不是从零开发基础组件
-3. **遵循 Next.js App Router 规范**，正确区分服务端/客户端组件
-4. **使用 TypeScript** 进行类型安全开发
-5. **使用 `@/` 路径别名** 导入模块（已配置）
+### 启动
+
+```bash
+git clone https://github.com/Echo-cln/coze.git
+cd coze
+corepack enable
+corepack prepare pnpm@11.25.0 --activate
+pnpm install --frozen-lockfile
+cp .env.example .env.local
+pnpm dev
+```
+
+运行安全回归：
+
+```bash
+pnpm test:security
+```
+
+浏览器访问 [http://localhost:5000](http://localhost:5000)。
+
+未配置工作流地址时，应用会使用 mock 数据展示界面和流程交互；这适合本地预览，不代表真实材料已被解析或评估。要运行真实链路，请在 `.env.local` 配置已部署的工作流端点和对应凭证。
+
+### 生产构建与启动
+
+```bash
+pnpm build
+COZE_PROJECT_ENV=PROD PORT=5000 pnpm start
+```
+
+自定义运行端口时同步设置 `PORT`。部署平台需将应用绑定到容器可访问的网络接口，并在平台密钥管理中配置工作流凭证；不要将 `.env.local` 或密钥写入镜像。
+
+## 工作流配置
+
+| 变量 | 用途 |
+|---|---|
+| `WF10_BASE_URL` | 材料解析工作流服务地址 |
+| `WF10_API_TOKEN` | WF10 服务凭证（服务要求时配置） |
+| `C_MODULE_BASE_URL` | 证据抽取与冲突检测服务地址 |
+| `C_MODULE_API_TOKEN` | C 模块服务凭证（服务要求时配置） |
+| `WF60_BASE_URL` | 报告渲染与导出服务地址 |
+| `WF60_API_TOKEN` | WF60 服务凭证（服务要求时配置） |
+| `COZE_BUCKET_ENDPOINT_URL` | 文件转存使用的对象存储端点 |
+| `COZE_BUCKET_NAME` | 文件转存使用的存储桶名称 |
+| `COZE_WORKLOAD_API_TOKEN` | Coze OpenAPI 凭证（启用相应 Coze API 功能时） |
+| `COZE_WORKFLOW_ID` | Coze 工作流 ID（启用相应 Coze API 功能时） |
+| `COZE_API_BASE_URL` | Coze API 地址，默认为国内站 |
+
+完整变量模板见 [`.env.example`](.env.example)。不要将真实 Token、签名 URL 或用户材料提交到 Git。
+
+## API 与事件流
+
+| 路由 | 作用 |
+|---|---|
+| `POST /api/report/parse` | 调用 WF10 解析文件和 URL，返回来源与解析切片 |
+| `POST /api/report/generate` | 调用 C 模块，生成证据、冲突和报告结果 |
+| `POST /api/report/audit-pack` | 将当前任务结果生成可下载的 JSON 审计包 |
+
+生成接口在正文生成后执行确定性的结构完整性检查：验证引用编号是否存在、必备章节是否齐全，并统计来源解析状态和正文段落引用率。它不代表事实正确率或模型效果基准。生成接口以 SSE 事件向前端推送流程状态。主要事件为 `progress`、`evidence`、`conflict`、`content`、`metrics`、`done` 和 `error`。具体输入和输出字段以 `src/app/api/report/` 下的路由实现与工作流契约为准。
+
+## 本地验证
+
+```bash
+pnpm test:security
+pnpm ts-check
+pnpm lint:build
+pnpm lint:style
+pnpm audit --registry=https://registry.npmjs.org
+pnpm build
+```
+
+GitHub Actions 会在 push 和 pull request 上运行同一组检查。
+
+## 安全与部署边界
+
+这个仓库包含服务端 API 和外部工作流凭证配置。真实链路上线时，请把应用放在公司 SSO、身份认证网关或可信访问代理之后；当前仓库没有内置用户认证、租户隔离、持久化任务授权或跨实例限流，不能把配置了真实 Token 的公开实例直接暴露到互联网。
+
+目前已落实的基础防护包括：
+
+- 报告预览先转义文本，只允许 HTTP/HTTPS 和页内锚点链接，避免模型输出把脚本注入工作台。
+- API 限制 JSON 请求体为 8 MB；上传最多 20 个文件、单文件 20 MB、合计 100 MB，并校验允许的扩展名。
+- 在线来源仅接受公网 HTTP/HTTPS 地址，并拒绝常见私网、回环和本机地址；工作流服务也应配置出站网络限制，抵御 DNS 解析变化和工作流侧 SSRF。
+- 对外请求设有超时；错误响应不回传上游服务正文；导出接口限制请求大小并禁用缓存。
+- 移除通配远程图片主机，并添加基础安全响应头。
+
+依赖扫描使用 npm 官方审计源；本次锁文件审计结果为 **0 条已知漏洞**。审计数据库会变化，升级依赖后应重新运行 `pnpm audit`。自动化检查不等同于渗透测试，也不能证明 Coze 工作流、对象存储策略或部署网络配置安全。部署前应单独验证身份认证、存储桶访问权限、签名 URL 有效期、工作流出站访问规则与日志脱敏。不要上传真实敏感材料进行公开演示。
+
+## 当前边界与下一步
+
+仓库已具备可运行的工作台与工作流接入层，并在 push 和 pull request 上运行 CI：安全回归、类型检查、代码与样式 lint、依赖漏洞审计和生产构建都会自动执行。项目仍处于 Beta / 研究原型阶段，完整效果依赖尚未随仓库发布的 Coze 工作流定义，当前也没有可复现的模型效果基准。
+
+下一阶段优先补齐：
+
+- 将 Coze 工作流定义、节点说明和版本信息纳入可追踪的文档或可导入导出文件。
+- 建立带人工标注的评测集，分别评估事实抽取、去重和冲突识别，并公布可复现的指标与样例。
+- 让质量面板展示真实计算结果；未测量的指标应明确标为未知，不能用固定值替代。
+- 补齐真实文件上传失败、工作流超时、空结果和 SSE 中断的端到端演示与复现步骤。
+- 在确认项目授权范围后补充开源许可证和贡献指南；公开仓库本身不代表代码已授予再使用许可。
+- 真实业务部署仍需接入身份认证、租户隔离和跨实例限流，并在可信访问边界后运行。
+
+## 目录结构
+
+```text
+src/
+├── app/
+│   └── api/report/       # 解析、生成、审计包 API
+├── components/           # 工作台与业务组件
+├── hooks/                # 表单与工作流状态
+├── lib/                  # 类型、存储、Coze 客户端与工具
+└── server.ts             # Next.js 自定义服务入口
+assets/                   # 界面截图与工作流接口资料
+docs/                     # 证据流水线设计、接口契约与评测计划
+tests/                    # 安全回归测试
+.github/workflows/        # GitHub Actions CI
+```
+
+## 参与改进
+
+欢迎围绕以下方向提出 Issue 或 Pull Request：可追溯事实抽取、冲突判断评测、工作流接口稳定性、失败恢复与报告可用性。提交涉及模型效果的改动时，请附上可复现输入、预期输出和评测方法。
+
+---
+
+**EvidenceOS · Reports you can trace back to evidence.**
+
