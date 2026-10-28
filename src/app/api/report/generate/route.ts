@@ -1617,26 +1617,6 @@ async function runMockGeneration(params: {
       }
     }
 
-    if (i === 2) {
-      const mockConflicts = [
-        {
-          conflict_id: "CF001",
-          evidence_ids: ["E000001", "E000003"],
-          conflict_type: "definition",
-          severity: "medium",
-          summary: "市场份额统计口径存在差异",
-          explanation:
-            "一处来源使用全渠道可比口径，另一处使用上市部分口径，两者统计范围不同。",
-          resolution: "preserve_both",
-          resolved: false,
-        },
-      ];
-      mockConflictsForAudit = mockConflicts as unknown as ConflictItem[];
-      for (const cf of mockConflicts) {
-        sendEvent("conflict", cf);
-      }
-    }
-
     if (i === 3) {
       // 用结构化模板生成内容丰富的专业报告
       const mockEvidenceForReport = [
@@ -1784,6 +1764,12 @@ async function runMockGeneration(params: {
       ];
       mockEvidenceForAudit = mockEvidenceForReport as unknown as EvidenceItem[];
       mockConflictsForAudit = mockConflictsForReport as unknown as ConflictItem[];
+      for (const evidenceItem of mockEvidenceForReport) {
+        sendEvent("evidence", evidenceItem);
+      }
+      for (const conflictItem of mockConflictsForReport) {
+        sendEvent("conflict", conflictItem);
+      }
 
       const sections = buildSectionsFromEvidence(
         mockEvidenceForReport as unknown as EvidenceItem[],
