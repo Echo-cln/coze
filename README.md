@@ -39,9 +39,9 @@ EvidenceOS 将**证据可追溯**与**冲突可解释**作为报告链路的核�
 
 ## 架构一览
 
-\`WF10\`、\`C 模块\` 和 \`WF60\` 是外部工作流服务，通过环境变量配置。Web 应用负责接收用户输入、转发任务、翻译 SSE 事件并呈现结果。
+`WF10`、`C 模块` 和 `WF60` 是外部工作流服务，通过环境变量配置。Web 应用负责接收用户输入、转发任务、翻译 SSE 事件并呈现结果。
 
-\`\`\`mermaid
+```mermaid
 flowchart LR
     U["用户材料与分析问题"] --> W["Next.js 工作台"]
     W --> P["/api/report/parse"]
@@ -51,7 +51,7 @@ flowchart LR
     C --> L["报告生成与引用校验"]
     L --> WF60["WF60 渲染与导出（可选）"]
     L --> R["报告、证据台账、冲突清单"]
-\`\`\`
+```
 
 ### 你负责的模块：证据抽取与冲突检测
 
@@ -65,7 +65,7 @@ C 模块承接解析切片或知识库检索结果，产出可供报告生成使
 6. **语义冲突判定**：补充规则难以覆盖的文本矛盾判断，并说明涉及的事实与判定理由。
 7. **冲突合并与统计**：合并重复冲突，关联证据 ID，汇总类型和风险等级后输出。
 
-**证据台账是模块输出的关键接口。** 每条事实应尽可能包含 \`evidence_id\`、\`source_id\`、\`subject\`、\`predicate\`、\`value\`、\`unit\`、\`period\`、\`scope\`、\`quote\`、\`locator\` 和 \`confidence\`。冲突清单应关联 \`evidence_ids\`，让用户可以从“存在差异”继续追到差异双方的原始依据。
+**证据台账是模块输出的关键接口。** 每条事实应尽可能包含 `evidence_id`、`source_id`、`subject`、`predicate`、`value`、`unit`、`period`、`scope`、`quote`、`locator` 和 `confidence`。冲突清单应关联 `evidence_ids`，让用户可以从“存在差异”继续追到差异双方的原始依据。
 
 > 上述流程节点来自项目中的工作流图与数据契约说明。具体提示词、规则阈值、模型配置和节点级评测尚未随仓库发布；README 不将这些未公开配置表述为已经验证的实现细节。
 
@@ -89,45 +89,45 @@ C 模块承接解析切片或知识库检索结果，产出可供报告生成使
 
 ### 启动
 
-\`\`\`bash
+```bash
 git clone https://github.com/Echo-cln/coze.git
 cd coze
 pnpm install
 cp .env.example .env.local
 pnpm dev
-\`\`\`
+```
 
 浏览器访问 [http://localhost:5000](http://localhost:5000)。
 
-未配置工作流地址时，应用会使用 mock 数据展示界面和流程交互；这适合本地预览，不代表真实材料已被解析或评估。要运行真实链路，请在 \`.env.local\` 配置已部署的工作流端点和对应凭证。
+未配置工作流地址时，应用会使用 mock 数据展示界面和流程交互；这适合本地预览，不代表真实材料已被解析或评估。要运行真实链路，请在 `.env.local` 配置已部署的工作流端点和对应凭证。
 
 ## 工作流配置
 
 | 变量 | 用途 |
 |---|---|
-| \`WF10_BASE_URL\` | 材料解析工作流服务地址 |
-| \`WF10_API_TOKEN\` | WF10 服务凭证（服务要求时配置） |
-| \`C_MODULE_BASE_URL\` | 证据抽取与冲突检测服务地址 |
-| \`C_MODULE_API_TOKEN\` | C 模块服务凭证（服务要求时配置） |
-| \`WF60_BASE_URL\` | 报告渲染与导出服务地址 |
-| \`WF60_API_TOKEN\` | WF60 服务凭证（服务要求时配置） |
-| \`COZE_BUCKET_ENDPOINT_URL\` | 文件转存使用的对象存储端点 |
-| \`COZE_BUCKET_NAME\` | 文件转存使用的存储桶名称 |
-| \`COZE_WORKLOAD_API_TOKEN\` | Coze OpenAPI 凭证（启用相应 Coze API 功能时） |
-| \`COZE_WORKFLOW_ID\` | Coze 工作流 ID（启用相应 Coze API 功能时） |
-| \`COZE_API_BASE_URL\` | Coze API 地址，默认为国内站 |
+| `WF10_BASE_URL` | 材料解析工作流服务地址 |
+| `WF10_API_TOKEN` | WF10 服务凭证（服务要求时配置） |
+| `C_MODULE_BASE_URL` | 证据抽取与冲突检测服务地址 |
+| `C_MODULE_API_TOKEN` | C 模块服务凭证（服务要求时配置） |
+| `WF60_BASE_URL` | 报告渲染与导出服务地址 |
+| `WF60_API_TOKEN` | WF60 服务凭证（服务要求时配置） |
+| `COZE_BUCKET_ENDPOINT_URL` | 文件转存使用的对象存储端点 |
+| `COZE_BUCKET_NAME` | 文件转存使用的存储桶名称 |
+| `COZE_WORKLOAD_API_TOKEN` | Coze OpenAPI 凭证（启用相应 Coze API 功能时） |
+| `COZE_WORKFLOW_ID` | Coze 工作流 ID（启用相应 Coze API 功能时） |
+| `COZE_API_BASE_URL` | Coze API 地址，默认为国内站 |
 
-完整变量模板见 [\`.env.example\`](.env.example)。不要将真实 Token、签名 URL 或用户材料提交到 Git。
+完整变量模板见 [`.env.example`](.env.example)。不要将真实 Token、签名 URL 或用户材料提交到 Git。
 
 ## API 与事件流
 
 | 路由 | 作用 |
 |---|---|
-| \`POST /api/report/parse\` | 调用 WF10 解析文件和 URL，返回来源与解析切片 |
-| \`POST /api/report/generate\` | 调用 C 模块，生成证据、冲突和报告结果 |
-| \`GET /api/report/audit-pack\` | 审计包导出入口；真实工作流导出尚待补全 |
+| `POST /api/report/parse` | 调用 WF10 解析文件和 URL，返回来源与解析切片 |
+| `POST /api/report/generate` | 调用 C 模块，生成证据、冲突和报告结果 |
+| `GET /api/report/audit-pack` | 审计包导出入口；真实工作流导出尚待补全 |
 
-生成接口以 SSE 事件向前端推送流程状态。主要事件为 \`progress\`、\`evidence\`、\`conflict\`、\`content\`、\`metrics\`、\`done\` 和 \`error\`。具体输入和输出字段以 \`src/app/api/report/\` 下的路由实现与工作流契约为准。
+生成接口以 SSE 事件向前端推送流程状态。主要事件为 `progress`、`evidence`、`conflict`、`content`、`metrics`、`done` 和 `error`。具体输入和输出字段以 `src/app/api/report/` 下的路由实现与工作流契约为准。
 
 ## 当前边界与下一步
 
@@ -142,7 +142,7 @@ pnpm dev
 
 ## 目录结构
 
-\`\`\`text
+```text
 src/
 ├── app/
 │   └── api/report/       # 解析、生成、审计包 API
@@ -151,7 +151,7 @@ src/
 ├── lib/                  # 类型、存储、Coze 客户端与工具
 └── server.ts             # Next.js 自定义服务入口
 assets/                   # 界面截图与工作流接口资料
-\`\`\`
+```
 
 ## 参与改进
 
