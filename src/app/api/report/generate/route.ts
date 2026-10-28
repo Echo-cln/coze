@@ -352,6 +352,10 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        if (!cModuleDone || !finalOutput) {
+          throw new Error("C 模块流已结束，但未收到完整的 workflow_end 结果；请检查工作流运行日志后重试。");
+        }
+
         // 计算失败来源和质量指标
         const allFailed = allSources.filter((s) => s.parse_status === "failed");
         let wf60FinalOutput: any = null;
