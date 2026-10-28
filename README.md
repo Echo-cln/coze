@@ -88,20 +88,26 @@ C 模块承接解析切片或知识库检索结果，产出可供报告生成使
 
 ### 环境要求
 
-- Node.js 20.19+
-- pnpm 11.25+
+- Node.js 22 或更高版本（pnpm 11 要求）
+- pnpm 11.25
 
 ### 启动
 
 ```bash
 git clone https://github.com/Echo-cln/coze.git
 cd coze
-corepack enable
-corepack prepare pnpm@11.25.0 --activate
+npm install --global pnpm@11.25.0
 pnpm install --frozen-lockfile
-cp .env.example .env.local
 pnpm dev
 ```
+
+首次运行前，从模板创建本地环境文件：
+
+```powershell
+Copy-Item .env.example .env.local
+```
+
+macOS / Linux 可使用 `cp .env.example .env.local`。
 
 运行安全回归：
 
@@ -117,7 +123,20 @@ pnpm test:security
 
 ```bash
 pnpm build
+```
+
+Linux / macOS 启动：
+
+```bash
 COZE_PROJECT_ENV=PROD PORT=5000 pnpm start
+```
+
+Windows PowerShell 启动：
+
+```powershell
+$env:COZE_PROJECT_ENV="PROD"
+$env:PORT="5000"
+pnpm start
 ```
 
 自定义运行端口时同步设置 `PORT`。部署平台需将应用绑定到容器可访问的网络接口，并在平台密钥管理中配置工作流凭证；不要将 `.env.local` 或密钥写入镜像。

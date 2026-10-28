@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "bash ./scripts/build.sh",
-    "dev": "bash ./scripts/dev.sh",
+    "build": "next build && tsup src/server.ts --format cjs --platform node --target node20 --outDir dist --no-splitting --no-minify",
+    "dev": "tsx watch src/server.ts",
     "preinstall": "npx only-allow pnpm",
     "lint": "eslint",
     "lint:build": "eslint src tests next.config.ts eslint.config.mjs --quiet",
     "lint:style": "stylelint \"src/**/*.css\"",
-    "start": "bash ./scripts/start.sh",
+    "start": "node dist/server.js",
     "ts-check": "next typegen && tsc -p tsconfig.json",
     "test:security": "node --import tsx --test tests/security.test.ts",
     "validate": "pnpm dlx concurrently --group --names lint-tsc,lint-build,lint-style \"pnpm ts-check\" \"pnpm lint:build\" \"pnpm lint:style\""
