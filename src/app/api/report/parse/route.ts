@@ -84,6 +84,10 @@ export async function POST(req: NextRequest) {
   const storageReady = isStorageAvailable();
   const wf10Files: Array<{ url: string; file_type: string }> = [];
 
+  if (fileEntries.length > 0 && !storageReady) {
+    return sseError("已配置 WF10，但没有配置对象存储；无法将上传文件安全地传给解析工作流。请配置 COZE_BUCKET_ENDPOINT_URL 和 COZE_BUCKET_NAME，或改用在线来源 URL。");
+  }
+
   for (const file of fileEntries) {
     if (storageReady) {
       const arrayBuffer = await file.arrayBuffer();
@@ -93,9 +97,8 @@ export async function POST(req: NextRequest) {
         wf10Files.push({ url: signedUrl, file_type: "document" });
         continue;
       }
+      return sseError(`文件 ${file.name} 上传对象存储失败，已停止解析，避免静默跳过该材料。`);
     }
-    // 存储不可用或上传失败，依然继续（WF10 可能支持其他方式，这里放一个占位）
-    // 实际生产中应报错，但为了兼容 mock 与本地开发，跳过此处
   }
 
   const wf10Base = getWf10BaseUrl()!;
@@ -183,11 +186,11 @@ function translateWf10Stream(wf10Body: ReadableStream<Uint8Array>): Response {
           buffer += decoder.decode(value, { stream: true });
 
           // 按 SSE 事件边界切分
-          const eventBlocks = buffer.split("\n\n");
+          const eventBlocks = buffer.split(/\r?\n\r?\n/);
           buffer = eventBlocks.pop() || "";
 
           for (const block of eventBlocks) {
-            const lines = block.split("\n").filter((l) => l.length > 0);
+            const lines = block.split(/\r?\n/).filter((l) => l.length > 0);
             let eventName = "message";
             let dataStr = "";
 

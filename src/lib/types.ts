@@ -10,7 +10,7 @@ export type ParseStatus =
   | "ocr_pending"
   | "failed";
 
-export type ConflictType = "hard" | "definition" | "time" | "semantic" | "source";
+export type ConflictType = "hard" | "definition" | "caliber" | "time" | "timing" | "semantic" | "source";
 
 export type ConflictSeverity = "critical" | "high" | "medium" | "low";
 
@@ -137,32 +137,36 @@ export interface WorkflowStep {
 }
 
 export interface QualityMetrics {
-  citation_validity: number; // 0-1
-  citation_coverage: number;
-  source_parse_coverage: number;
-  required_section_coverage: number;
+  citation_validity: number | null; // mechanically checked cited IDs / cited IDs
+  citation_coverage: number | null; // report paragraphs containing at least one evidence citation
+  source_parse_coverage: number | null;
+  required_section_coverage: number | null;
   critical_conflicts_open: number;
   total_evidence: number;
   total_sources: number;
   total_conflicts: number;
   failed_sources: number;
   template_version: string;
-  run_time_seconds: number;
+  run_time_seconds: number | null;
+  quality_status?: "passed" | "blocked" | "review_required";
+  blocking_reasons?: string[];
+  invalid_citation_ids?: string[];
+  missing_required_sections?: string[];
+  measurement_mode?: "observed" | "demo";
 }
 
 // ===== 工作流输出类型 =====
 
-/**
- * C 模块（完整证据+冲突+报告生成工作流）输出
- * 端口 9000，入口 A/B/C 三选一
- */
+/** Adapter accepts the known C Module field aliases; the external workflow is versioned separately. */
 export interface CModuleOutput {
-  final_claims: Array<Record<string, unknown>>;
-  merged_claims: Array<Record<string, unknown>>;
-  merged_evidences: EvidenceItem[];
-  conflicts: Array<Record<string, unknown>>;
-  audit_summary: Record<string, unknown>;
-  report_markdown: string;
+  evidence_ledger?: EvidenceItem[];
+  merged_evidences?: EvidenceItem[];
+  conflict_register?: ConflictItem[];
+  conflicts?: ConflictItem[];
+  source_manifest?: SourceRegistry[];
+  stats?: Record<string, number>;
+  report_markdown?: string;
+  [key: string]: unknown;
 }
 
 /**
@@ -310,7 +314,9 @@ export const AUDIENCE_LABELS: Record<Audience, string> = {
 export const CONFLICT_TYPE_LABELS: Record<ConflictType, string> = {
   hard: "硬冲突",
   definition: "口径差异",
+  caliber: "统计口径差异",
   time: "时效冲突",
+  timing: "时效冲突",
   semantic: "语义冲突",
   source: "来源差异",
 };

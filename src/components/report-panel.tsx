@@ -314,17 +314,17 @@ function QualityGauge({
   invert = false,
 }: {
   label: string;
-  value: number;
+  value: number | null;
   target: number;
   unit?: string;
   invert?: boolean;
 }) {
-  const pct = Math.min(100, Math.max(0, value * 100));
+  const pct = value === null ? 0 : Math.min(100, Math.max(0, value * 100));
   const targetPct = target * 100;
-  const isGood = invert ? value <= target : value >= target;
+  const isGood = value !== null && (invert ? value <= target : value >= target);
   const barColor = isGood
     ? "bg-emerald-500"
-    : value >= target * 0.9
+    : value !== null && value >= target * 0.9
     ? "bg-amber-500"
     : "bg-rose-500";
 
@@ -333,13 +333,9 @@ function QualityGauge({
       <div className="flex items-center justify-between">
         <span className="text-xs text-slate-600 dark:text-slate-400">{label}</span>
         <span
-          className={`text-xs font-mono font-semibold tabular-nums ${
-            isGood
-              ? "text-emerald-600 dark:text-emerald-400"
-              : "text-rose-600 dark:text-rose-400"
-          }`}
+          className={`text-xs font-mono font-semibold tabular-nums ${value === null ? "text-slate-400" : isGood ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}
         >
-          {unit === "%" ? pct.toFixed(1) + "%" : value + unit}
+          {value === null ? "未计算" : unit === "%" ? pct.toFixed(1) + "%" : value + unit}
         </span>
       </div>
       <div className="h-1.5 w-full bg-slate-100 dark:bg-slate-800 rounded-full relative overflow-hidden">
@@ -347,7 +343,7 @@ function QualityGauge({
           className={`h-full ${barColor} rounded-full transition-all duration-500`}
           style={{ width: `${pct}%` }}
         />
-        {unit === "%" && (
+        {unit === "%" && value !== null && (
           <div
             className="absolute top-0 bottom-0 w-px bg-slate-400 dark:bg-slate-500"
             style={{ left: `${targetPct}%` }}
@@ -567,7 +563,7 @@ export function ReportPanel({
   const totalSteps = steps.length;
 
   const hasBlockingIssue =
-    strictMode && conflictRegister.some((c) => c.severity === "high" && !c.resolved);
+    strictMode && conflictRegister.some((c) => ["critical", "high"].includes(c.severity) && !c.resolved);
 
   const criticalCount = conflictRegister.filter((c) => c.severity === "critical").length;
   const highCount = conflictRegister.filter((c) => c.severity === "high").length;
@@ -638,7 +634,7 @@ export function ReportPanel({
             <Button
               variant="secondary"
               onClick={onRevalidate}
-              disabled={!hasReport || !hasConflicts || isGenerating}
+          disabled={!hasReport || isGenerating}
             >
               <RefreshCw className="h-4 w-4 mr-2" />
               重新校验
@@ -905,29 +901,21 @@ export function ReportPanel({
                   {hasQuality ? (
                     <div className="space-y-5">
                       {/* 总体状态 */}
-                      <div
-                        className={`p-4 rounded-lg border ${
-                          qualityMetrics.critical_conflicts_open > 0 && strictMode
-                            ? "bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-900"
-                            : "bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900"
-                        }`}
-                      >
+                      <div className={`p-4 rounded-lg border ${qualityMetrics.quality_status === "blocked" ? "bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-900" : qualityMetrics.quality_status === "review_required" ? "bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900" : "bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900"}`}>
                         <div className="flex items-center gap-3">
-                          {qualityMetrics.critical_conflicts_open > 0 && strictMode ? (
+                          {qualityMetrics.quality_status === "blocked" ? (
                             <FileX className="h-8 w-8 text-rose-500" />
+                          ) : qualityMetrics.quality_status === "review_required" ? (
+                            <AlertTriangle className="h-8 w-8 text-amber-500" />
                           ) : (
                             <FileCheck className="h-8 w-8 text-emerald-500" />
                           )}
                           <div>
                             <p className="text-base font-semibold text-slate-900 dark:text-slate-100">
-                              {qualityMetrics.critical_conflicts_open > 0 && strictMode
-                                ? "质量闸门未通过"
-                                : "质量校验通过"}
+                              {qualityMetrics.quality_status === "blocked" ? "质量闸门未通过" : qualityMetrics.quality_status === "review_required" ? "需要人工复核" : "完整性检查通过"}
                             </p>
                             <p className="text-xs text-slate-500">
-                              {qualityMetrics.critical_conflicts_open > 0 && strictMode
-                                ? "严格模式下存在未解决的严重冲突"
-                                : "所有质量指标均达到发布标准"}
+                              {qualityMetrics.blocking_reasons?.length ? qualityMetrics.blocking_reasons.join("；") : qualityMetrics.measurement_mode === "demo" ? "演示数据：指标仅反映本地规则检查，不代表模型准确率" : "展示的是引用、章节与来源完整性检查，不代表模型效果基准"}
                             </p>
                           </div>
                         </div>
@@ -940,12 +928,12 @@ export function ReportPanel({
                           核心质量指标
                         </h3>
                         <QualityGauge
-                          label="引用有效率"
+                          label="引用编号有效率"
                           value={qualityMetrics.citation_validity}
                           target={1.0}
                         />
                         <QualityGauge
-                          label="事实句引用覆盖率"
+                          label="正文段落引用率"
                           value={qualityMetrics.citation_coverage}
                           target={0.98}
                         />
@@ -955,7 +943,7 @@ export function ReportPanel({
                           target={0.95}
                         />
                         <QualityGauge
-                          label="必备章节完整率"
+                          label="必备章节覆盖率"
                           value={qualityMetrics.required_section_coverage}
                           target={1.0}
                         />
@@ -1014,7 +1002,7 @@ export function ReportPanel({
                         <div className="flex items-center justify-between text-xs">
                           <span className="text-slate-500">运行时长</span>
                           <span className="font-mono text-slate-700 dark:text-slate-300">
-                            {qualityMetrics.run_time_seconds.toFixed(1)} 秒
+                            {qualityMetrics.run_time_seconds === null ? "未记录" : `${qualityMetrics.run_time_seconds.toFixed(1)} 秒`}
                           </span>
                         </div>
                         <div className="flex items-center justify-between text-xs">

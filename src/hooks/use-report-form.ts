@@ -16,6 +16,7 @@ import type {
   ParsedChunk,
 } from "@/lib/types";
 import { WORKFLOW_STEPS } from "@/lib/types";
+import { evaluateReportQuality } from "@/lib/quality";
 
 const genId = (): string =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -37,6 +38,10 @@ async function consumeSseStream(
   response: Response,
   onEvent: (evt: SseEvent) => void,
 ): Promise<void> {
+  if (!response.ok) {
+    const message = await response.text().catch(() => "");
+    throw new Error(message || `请求失败（HTTP ${response.status}）`);
+  }
   if (!response.body) return;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -49,12 +54,12 @@ async function consumeSseStream(
     buffer += decoder.decode(value, { stream: true });
 
     // 按双换行分割事件
-    const blocks = buffer.split(/\n\n+/);
+    const blocks = buffer.split(/\r?\n\r?\n+/);
     // 最后一块可能不完整，留到下次
     buffer = blocks.pop() || "";
 
     for (const block of blocks) {
-      const lines = block.split("\n").filter((l) => l.trim());
+      const lines = block.split(/\r?\n/).filter((l) => l.trim());
       let eventName = "";
       let dataLines: string[] = [];
 
@@ -77,7 +82,7 @@ async function consumeSseStream(
 
   // 处理最后剩余
   if (buffer.trim()) {
-    const lines = buffer.split("\n").filter((l) => l.trim());
+    const lines = buffer.split(/\r?\n/).filter((l) => l.trim());
     let eventName = "";
     let dataLines: string[] = [];
     for (const line of lines) {
@@ -529,7 +534,7 @@ export function useReportForm() {
 
             // 标记全部步骤为 done
             Object.values(stepMap).forEach((sid) => setStepStatus(sid, "completed"));
-            setJobStatus("done");
+            setJobStatus(qualityMetrics.quality_status === "blocked" ? "blocked" : "done");
             setIsGenerating(false);
             break;
           }
@@ -577,47 +582,54 @@ export function useReportForm() {
   const revalidate = useCallback(() => {
     if (jobStatus === "idle" || isParsing || isGenerating) return;
 
-    setStepStatus("audit", "running");
-    setJobStatus("writing");
-
-    setTimeout(() => {
-      setQualityMetrics((prev) =>
-        prev
-          ? {
-              ...prev,
-              citation_validity: Math.min(1, prev.citation_validity + 0.01),
-            }
-          : prev,
-      );
-      setStepStatus("audit", "completed");
-      setJobStatus("done");
-    }, 1500);
-  }, [jobStatus, isParsing, isGenerating, setStepStatus]);
+    setStepStatus("citation_qa", "running");
+    const metrics = evaluateReportQuality({
+      report: reportContent,
+      evidence: evidenceLedger,
+      conflicts: conflictRegister,
+      sources: sourceRegistry,
+      strictMode,
+    });
+    setQualityMetrics(metrics);
+    setStepStatus("citation_qa", "completed");
+    setJobStatus(metrics.quality_status === "blocked" ? "blocked" : "done");
+  }, [jobStatus, isParsing, isGenerating, reportContent, evidenceLedger, conflictRegister, sourceRegistry, strictMode, setStepStatus]);
 
   // ============ 导出审计包 ============
-  const exportAudit = useCallback(() => {
-    const pack = {
+  const exportAudit = useCallback(async () => {
+    try {
+      const pack = {
       job_id: jobId,
-      generated_at: new Date().toISOString(),
-      version: "1.0.0",
       report: reportContent,
       evidence_ledger: evidenceLedger,
       conflict_register: conflictRegister,
       source_registry: sourceRegistry,
       quality_metrics: qualityMetrics,
-    };
+      };
 
-    const blob = new Blob([JSON.stringify(pack, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `audit_pack_${jobId || "report"}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+      const response = await fetch("/api/report/audit-pack", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pack),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        setErrorMessage(payload?.error || "审计包导出失败");
+        return;
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `audit_pack_${jobId || "report"}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "审计包导出失败");
+    }
   }, [jobId, reportContent, evidenceLedger, conflictRegister, sourceRegistry, qualityMetrics]);
 
   // ============ 可解析性判断 ============

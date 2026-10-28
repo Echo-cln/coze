@@ -4,7 +4,6 @@ import type {
   SourceRegistry,
   EvidenceItem,
   ConflictItem,
-  QualityMetrics,
   CModuleOutput,
   WF60Output,
 } from "@/lib/types";
@@ -12,6 +11,7 @@ import {
   uploadAndGetSignedUrl,
   isStorageAvailable,
 } from "@/lib/storage";
+import { evaluateReportQuality } from "@/lib/quality";
 
 export const runtime = "nodejs";
 export const maxDuration = 900; // 长任务
@@ -39,6 +39,7 @@ export const maxDuration = 900; // 长任务
  *   event: error     — 错误
  */
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
   const contentType = req.headers.get("content-type") || "";
   let jobId = `JOB_${Date.now()}`;
   let industry = "finance";
@@ -143,22 +144,26 @@ export async function POST(req: NextRequest) {
         }
         // 入口 A：文件上传
         else if (fileEntries.length > 0) {
-          const files: Array<{ url: string; file_type: string }> = [];
           const storageOk = await isStorageAvailable();
 
-          if (storageOk) {
-            const fileUrls: string[] = [];
-            for (const file of fileEntries) {
-              const bytes = await file.arrayBuffer();
-              const signedUrl = await uploadAndGetSignedUrl(
-                Buffer.from(bytes),
-                file.name,
-                file.type || "application/octet-stream",
-              );
-              if (signedUrl) fileUrls.push(signedUrl);
-            }
-            cInput.files = fileUrls.map((url) => ({ url, file_type: "document" }));
+          if (!storageOk) {
+            throw new Error("C 模块处理上传文件需要对象存储。请配置 COZE_BUCKET_ENDPOINT_URL 和 COZE_BUCKET_NAME，或先完成 WF10 解析后传入 parsed_chunks。");
           }
+
+          const fileUrls: string[] = [];
+          for (const file of fileEntries) {
+            const bytes = await file.arrayBuffer();
+            const signedUrl = await uploadAndGetSignedUrl(
+              Buffer.from(bytes),
+              file.name,
+              file.type || "application/octet-stream",
+            );
+            if (signedUrl) fileUrls.push(signedUrl);
+          }
+          if (fileUrls.length !== fileEntries.length) {
+            throw new Error("至少一个文件未能上传到对象存储，已停止生成以避免材料缺失。");
+          }
+          cInput.files = fileUrls.map((url) => ({ url, file_type: "document" }));
         }
 
         // 入口 C：知识库检索（RAG）
@@ -245,9 +250,10 @@ export async function POST(req: NextRequest) {
           buffer += decoder.decode(value, { stream: true });
 
           let idx: number;
-          while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          while ((idx = buffer.search(/\r?\n\r?\n/)) !== -1) {
+            const separator = /\r?\n\r?\n/.exec(buffer.slice(idx))?.[0] || "\n\n";
             const raw = buffer.slice(0, idx);
-            buffer = buffer.slice(idx + 2);
+            buffer = buffer.slice(idx + separator.length);
 
             const event = parseSseEvent(raw);
             if (!event) continue;
@@ -271,6 +277,10 @@ export async function POST(req: NextRequest) {
                 // C 模块开始，步骤 1 正在运行（已在调用前设置）
               } else if (msgType === "workflow_end" && payload.output) {
                 const output = payload.output;
+
+                if (Array.isArray(output.source_manifest)) {
+                  allSources = output.source_manifest as SourceRegistry[];
+                }
 
                 // 收集证据
                 const evidences = (output.evidence_ledger ||
@@ -345,12 +355,6 @@ export async function POST(req: NextRequest) {
         // 计算失败来源和质量指标
         const allFailed = allSources.filter((s) => s.parse_status === "failed");
         let wf60FinalOutput: any = null;
-        const metrics = computeMetricsFromCModule(
-          allEvidence as any[],
-          allConflicts,
-          allSources,
-          strictMode,
-        );
         // 步骤 2 完成 → 步骤 3：大纲与撰写
         controller.enqueue(sendEvent("progress", { step: 2, label: stepNames[2], status: "completed" }));
         controller.enqueue(sendEvent("progress", { step: 3, label: stepNames[3], status: "running" }));
@@ -363,7 +367,7 @@ export async function POST(req: NextRequest) {
           industry,
           audience,
         );
-        const templateReport = buildReportFromSections(generatedSections, allConflicts, metrics, decisionQuestion, industry);
+        const templateReport = buildReportFromSections(generatedSections, decisionQuestion, industry);
         finalReport = templateReport; // 先把模板报告存好，确保有充足内容
 
         // 提取 forward headers 用于 LLM 调用
@@ -386,6 +390,36 @@ export async function POST(req: NextRequest) {
           audience,
           forwardHeaders,
         );
+
+        const metrics = evaluateReportQuality({
+          report: finalReport,
+          evidence: allEvidence,
+          conflicts: allConflicts,
+          sources: allSources,
+          strictMode,
+          startedAt,
+        });
+
+        const evidenceIds = new Set(allEvidence.map((item) => item.evidence_id));
+        const duplicateEvidenceIds = allEvidence
+          .map((item) => item.evidence_id)
+          .filter((id, index, ids) => ids.indexOf(id) !== index);
+        if (duplicateEvidenceIds.length > 0) {
+          throw new Error(`C 模块返回重复证据编号：${Array.from(new Set(duplicateEvidenceIds)).join("、")}`);
+        }
+        const duplicateConflictIds = allConflicts
+          .map((item) => item.conflict_id)
+          .filter((id, index, ids) => ids.indexOf(id) !== index);
+        if (duplicateConflictIds.length > 0) {
+          throw new Error(`C 模块返回重复冲突编号：${Array.from(new Set(duplicateConflictIds)).join("、")}`);
+        }
+        const invalidConflictRefs = allConflicts.flatMap((conflict) =>
+          conflict.evidence_ids.filter((id) => !evidenceIds.has(id)).map((id) => `${conflict.conflict_id} → ${id}`),
+        );
+        if (invalidConflictRefs.length > 0) {
+          throw new Error(`冲突清单引用了不存在的证据：${invalidConflictRefs.join("、")}`);
+        }
+        controller.enqueue(sendEvent("metrics", metrics));
 
         controller.enqueue(sendEvent("progress", { step: 3, label: stepNames[3], status: "completed" }));
 
@@ -634,7 +668,7 @@ function buildSectionsFromEvidence(
     metricsMd += "\n*数据来源：各原始材料对应章节，详见证据地图。*\n";
     sections.push({
       section_id: "sec_key_metrics",
-      title: "核心指标速览",
+      title: "核心指标概览",
       markdown: metricsMd.trim(),
       used_evidence_ids: keyMetrics.map((e) => e.evidence_id),
       used_conflict_ids: [],
@@ -795,7 +829,7 @@ function buildSectionsFromEvidence(
 
     sections.push({
       section_id: "sec_detailed_analysis",
-      title: "详细分析与证据交叉验证",
+      title: "详细分析",
       markdown: analysisMd.trim(),
       used_evidence_ids: allAnalysisEids,
       used_conflict_ids: conflicts.map((c) => c.conflict_id),
@@ -842,7 +876,7 @@ function buildSectionsFromEvidence(
 
     sections.push({
       section_id: "sec_conflicts",
-      title: "冲突与口径差异",
+      title: "冲突与差异分析",
       markdown: conflictMd.trim(),
       used_evidence_ids: [],
       used_conflict_ids: usedConflictIds,
@@ -1052,8 +1086,6 @@ function buildSectionsFromEvidence(
  */
 function buildReportFromSections(
   sections: any[],
-  conflicts: any[],
-  metrics: QualityMetrics,
   decisionQuestion: string,
   industry: string,
 ): string {
@@ -1097,26 +1129,7 @@ function buildReportFromSections(
 `;
   });
 
-  // 质量指标
-  md += `---
-
-## 质量与可信度评估
-
-`;
-  md += `| 指标 | 数值 | 说明 |
-|------|------|------|
-`;
-  md += `| 引用有效性 | ${Math.round((metrics.citation_validity || 0) * 100)}% | 所有引用是否均可追溯到原文 |
-`;
-  md += `| 引用覆盖率 | ${Math.round((metrics.citation_coverage || 0) * 100)}% | 核心论断有证据支撑的比例 |
-`;
-  md += `| 来源解析覆盖率 | ${Math.round((metrics.source_parse_coverage || 0) * 100)}% | 提交材料成功解析的比例 |
-`;
-  md += `| 未解决高风险冲突 | ${metrics.critical_conflicts_open || 0} 项 | 可能影响结论可靠性的严重冲突 |
-`;
-  md += `| 总证据数 | ${metrics.total_evidence || 0} 条 | 抽取到的有效证据条数 |
-
-`;
+  md += `---\n\n## 质量说明\n\n本报告的引用编号、章节完整性和来源状态由工作台在生成后进行结构检查。该检查不等同于事实正确性或模型效果评测；请结合证据台账与原始材料复核关键判断。\n\n`;
 
   // 页脚
   md += `---
@@ -1255,19 +1268,7 @@ ${conflictText}
     // LLM 失败/流中断时：如果已生成内容足够长，保留之；否则用模板报告兜底
     if (fullReport.length < 2000) {
       const sections = buildSectionsFromEvidence(evidences, conflicts, decisionQuestion, industry, audience);
-      const fallbackReport = buildReportFromSections(sections, conflicts, {
-        citation_validity: 0.95,
-        citation_coverage: 0.9,
-        source_parse_coverage: 0.95,
-        required_section_coverage: 1.0,
-        critical_conflicts_open: conflicts.filter((c) => c.severity === "high" && !c.resolved).length,
-        total_evidence: evidences.length,
-        total_sources: new Set(evidences.map((e) => e.source_id)).size,
-        total_conflicts: conflicts.length,
-        failed_sources: 0,
-        template_version: "1.0.0",
-        run_time_seconds: 0,
-      }, decisionQuestion, industry);
+      const fallbackReport = buildReportFromSections(sections, decisionQuestion, industry);
       // 把 LLM 已生成的内容拼在前面
       if (fullReport.length > 0) {
         fullReport = fullReport + "\n\n---\n\n" + fallbackReport;
@@ -1448,7 +1449,7 @@ code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: "
 }
 
 function parseSseEvent(raw: string): { type: string; data?: string } | null {
-  const lines = raw.split("\n");
+  const lines = raw.split(/\r?\n/);
   let event = "message";
   let data = "";
   for (const line of lines) {
@@ -1463,76 +1464,75 @@ function parseSseEvent(raw: string): { type: string; data?: string } | null {
 }
 
 function normalizeEvidence(raw: unknown): EvidenceItem {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("C 模块返回了无效的证据项");
+  }
   const r = raw as Record<string, unknown>;
+  const evidenceId = String(r.evidence_id || r.claim_id || r.id || "").trim();
+  const sourceId = String(r.source_id || "").trim();
+  const quote = String(r.quote || r.text || "").trim();
+  if (!evidenceId || !sourceId || !quote) {
+    throw new Error("证据项缺少 evidence_id、source_id 或原文引用，拒绝生成不可追溯报告");
+  }
+  const numericValue = r.value == null || r.value === "" ? null : Number(r.value);
+  const confidence = typeof r.confidence === "number" && Number.isFinite(r.confidence)
+    ? Math.min(1, Math.max(0, r.confidence))
+    : 0;
+  const locator = typeof r.locator === "object" && r.locator
+    ? (r.locator as EvidenceItem["locator"])
+    : typeof r.locator === "string" && r.locator.trim()
+      ? { section: r.locator.trim() }
+      : {};
   return {
-    evidence_id: String(r.evidence_id || r.claim_id || r.id || "E000000"),
-    source_id: String(r.source_id || "S001"),
+    evidence_id: evidenceId,
+    source_id: sourceId,
     source_title: String(r.source_title || r.document_name || ""),
     subject: String(r.subject || ""),
     predicate: String(r.predicate || ""),
     object: String(r.object || ""),
-    value: r.value != null ? Number(r.value) : null,
+    value: numericValue !== null && Number.isFinite(numericValue) ? numericValue : null,
     unit: r.unit ? String(r.unit) : undefined,
     period: r.period ? String(r.period) : undefined,
     scope: r.scope ? String(r.scope) : undefined,
     evidence_type: (r.evidence_type as EvidenceItem["evidence_type"]) || "fact",
-    locator: typeof r.locator === "object" && r.locator ? (r.locator as EvidenceItem["locator"]) : {},
-    quote: String(r.quote || r.text || ""),
-    confidence: typeof r.confidence === "number" ? r.confidence : 0.8,
-    source_authority:
-      typeof r.source_authority === "number" ? r.source_authority : 3,
+    locator,
+    quote,
+    confidence,
+    source_authority: typeof r.source_authority === "number" && Number.isFinite(r.source_authority) ? r.source_authority : 0,
   };
 }
 
 function normalizeConflict(raw: unknown): ConflictItem {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("C 模块返回了无效的冲突项");
+  }
   const r = raw as Record<string, unknown>;
+  const conflictId = String(r.conflict_id || r.id || "").trim();
+  const conflictType = String(r.conflict_type || "");
+  const severity = String(r.severity || "");
+  const summary = String(r.title || r.summary || r.description || "").trim();
+  const evidenceIds = Array.isArray(r.evidence_ids)
+    ? Array.from(new Set(r.evidence_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)))
+    : [];
+  const validConflictTypes = ["hard", "definition", "caliber", "time", "timing", "semantic", "source"];
+  const validSeverities = ["critical", "high", "medium", "low"];
+  if (!conflictId || evidenceIds.length < 2 || !summary || !validConflictTypes.includes(conflictType) || !validSeverities.includes(severity)) {
+    throw new Error("冲突项必须包含编号、类型、风险级别、摘要和至少两个 evidence_ids");
+  }
   const resolutionRaw = String(r.handling || r.resolution || "preserve_both");
   const validResolutions = ["prefer_latest", "prefer_authoritative", "preserve_both", "manual"] as const;
   const resolution = (validResolutions as readonly string[]).includes(resolutionRaw)
     ? (resolutionRaw as ConflictItem["resolution"])
     : "preserve_both";
   return {
-    conflict_id: String(r.conflict_id || r.id || "CF001"),
-    evidence_ids: Array.isArray(r.evidence_ids)
-      ? (r.evidence_ids as string[])
-      : [],
-    conflict_type:
-      (r.conflict_type as ConflictItem["conflict_type"]) || "semantic",
-    severity: (r.severity as ConflictItem["severity"]) || "medium",
-    summary: String(r.title || r.summary || r.description || "冲突"),
+    conflict_id: conflictId,
+    evidence_ids: evidenceIds,
+    conflict_type: conflictType as ConflictItem["conflict_type"],
+    severity: severity as ConflictItem["severity"],
+    summary,
     explanation: String(r.description || r.explanation || ""),
     resolution,
     resolved: r.resolved === true || r.status === "resolved",
-  };
-}
-
-function computeMetricsFromCModule(
-  evidence: EvidenceItem[],
-  conflicts: ConflictItem[],
-  sources: SourceRegistry[],
-  strict: boolean,
-): QualityMetrics {
-  const total = evidence.length || 1;
-  const critical = conflicts.filter(
-    (c) => c.severity === "critical" || c.severity === "high",
-  ).length;
-
-  return {
-    citation_validity: total > 0 ? 1.0 : 0,
-    citation_coverage: total > 0 ? Math.min(0.98, 0.85 + evidence.length * 0.01) : 0,
-    source_parse_coverage:
-      sources.length > 0
-        ? sources.filter((s) => s.parse_status === "ready").length /
-          sources.length
-        : 0,
-    required_section_coverage: 1.0,
-    critical_conflicts_open: critical,
-    total_evidence: evidence.length,
-    total_sources: sources.length,
-    total_conflicts: conflicts.length,
-    failed_sources: sources.filter((s) => s.parse_status === "failed").length,
-    template_version: "1.0.0",
-    run_time_seconds: 0,
   };
 }
 
@@ -1546,6 +1546,7 @@ async function runMockGeneration(params: {
   strictMode: boolean;
 }) {
   const { controller, encoder, industry, decisionQuestion, strictMode } = params;
+  const startedAt = Date.now();
 
   const sendEvent = (event: string, data: unknown) => {
     controller.enqueue(
@@ -1557,6 +1558,8 @@ async function runMockGeneration(params: {
 
   const steps = ["信息校验", "证据抽取", "冲突检测", "报告撰写", "合规审计"];
   let sampleReportText = "";
+  let mockEvidenceForAudit: EvidenceItem[] = [];
+  let mockConflictsForAudit: ConflictItem[] = [];
 
   for (let i = 0; i < steps.length; i++) {
     sendEvent("progress", {
@@ -1604,6 +1607,7 @@ async function runMockGeneration(params: {
           source_authority: 5,
         },
       ];
+      mockEvidenceForAudit = mockEvidence as unknown as EvidenceItem[];
       for (const ev of mockEvidence) {
         sendEvent("evidence", ev);
       }
@@ -1623,6 +1627,7 @@ async function runMockGeneration(params: {
           resolved: false,
         },
       ];
+      mockConflictsForAudit = mockConflicts as unknown as ConflictItem[];
       for (const cf of mockConflicts) {
         sendEvent("conflict", cf);
       }
@@ -1773,19 +1778,8 @@ async function runMockGeneration(params: {
           resolved: true,
         },
       ];
-      const mockMetrics = {
-        citation_validity: 0.96,
-        citation_coverage: 0.92,
-        source_parse_coverage: 0.95,
-        required_section_coverage: 1.0,
-        critical_conflicts_open: 0,
-        total_evidence: 8,
-        total_sources: 4,
-        total_conflicts: 1,
-        failed_sources: 0,
-        template_version: "2.0.0",
-        run_time_seconds: 45.2,
-      };
+      mockEvidenceForAudit = mockEvidenceForReport as unknown as EvidenceItem[];
+      mockConflictsForAudit = mockConflictsForReport as unknown as ConflictItem[];
 
       const sections = buildSectionsFromEvidence(
         mockEvidenceForReport as unknown as EvidenceItem[],
@@ -1796,8 +1790,6 @@ async function runMockGeneration(params: {
       );
       sampleReportText = buildReportFromSections(
         sections,
-        mockConflictsForReport,
-        mockMetrics,
         decisionQuestion,
         industry,
       );
@@ -1819,20 +1811,15 @@ async function runMockGeneration(params: {
     });
   }
 
-  // 质量指标
-  const finalMetrics = {
-    citation_validity: 0.96,
-    citation_coverage: 0.92,
-    source_parse_coverage: 0.95,
-    required_section_coverage: 1.0,
-    critical_conflicts_open: strictMode ? 0 : 1,
-    total_evidence: 8,
-    total_sources: 4,
-    total_conflicts: 1,
-    failed_sources: 0,
-    template_version: "2.0.0",
-    run_time_seconds: 45.2,
-  };
+  const finalMetrics = evaluateReportQuality({
+    report: sampleReportText,
+    evidence: mockEvidenceForAudit,
+    conflicts: mockConflictsForAudit,
+    sources: [],
+    strictMode,
+    startedAt,
+    measurementMode: "demo",
+  });
   sendEvent("metrics", finalMetrics);
 
   // 生成真实可下载的导出文件
@@ -1859,8 +1846,8 @@ async function runMockGeneration(params: {
     ok: true,
     report_markdown: sampleReportText,
     export_urls: exportUrls,
-    evidence_ledger: [],
-    conflict_register: [],
+    evidence_ledger: mockEvidenceForAudit,
+    conflict_register: mockConflictsForAudit,
     source_manifest: [],
     quality_metrics: finalMetrics,
   });

@@ -129,7 +129,7 @@ Before returning a workflow result:
 - return an explicit empty result when no facts or conflicts are found
 - return structured error details for malformed output or failed sources
 
-A successful workflow execution only indicates that the graph ran. It does not imply that extracted facts or conflicts are correct.
+The web application performs deterministic checks for cited evidence IDs, required headings, source status, and conflicts that reference missing evidence. These checks catch broken provenance links; they do not establish that a fact is true or that the model detected every contradiction. A successful workflow execution only indicates that the graph ran.
 
 ## 6. Evaluation plan
 
