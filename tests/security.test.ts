@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderInlineSafe } from "../src/lib/safe-markdown";
+import { evaluateReportQuality } from "../src/lib/quality";
 import {
   exceedsContentLength,
   normalizePublicHttpUrls,
@@ -71,4 +72,93 @@ test("report inline rendering formats bold text and safe table-of-contents links
 test("report fragment links reject attribute injection", () => {
   const rendered = renderInlineSafe('[x](#ok" onclick="alert(1))');
   assert.doesNotMatch(rendered, /onclick=/i);
+});
+
+
+test("strict report quality blocks missing provenance, weak citations, and placeholders", () => {
+  const report = [
+    "## 执行摘要",
+    "这段结论没有引用。",
+    "## 核心指标概览",
+    "## 详细分析",
+    "## 冲突与差异分析",
+    "## 风险提示",
+    "## 结论与建议",
+    "结论字段为 undefined。",
+  ].join("\n\n");
+  const result = evaluateReportQuality({
+    report,
+    evidence: [{
+      evidence_id: "E000001",
+      source_id: "S001",
+      subject: "比亚迪",
+      predicate: "销量",
+      object: "披露",
+      value: 100,
+      unit: "辆",
+      period: "2026-08",
+      scope: "月度",
+      evidence_type: "number",
+      locator: { page: 1 },
+      quote: "2026年8月销量100辆。",
+      confidence: 0.9,
+      source_authority: 5,
+    }],
+    conflicts: [],
+    sources: [],
+    strictMode: true,
+    decisionQuestion: "分析销量变化",
+  });
+
+  assert.equal(result.quality_status, "blocked");
+  assert.ok(result.blocking_reasons?.some((reason) => reason.includes("来源清单缺失")));
+  assert.ok(result.blocking_reasons?.some((reason) => reason.includes("引用覆盖率不足")));
+  assert.ok(result.blocking_reasons?.some((reason) => reason.includes("占位字段")));
+});
+
+test("strict report quality blocks a missing decision question", () => {
+  const report = [
+    "## 执行摘要",
+    "事实 [E000001]",
+    "## 核心指标概览",
+    "## 详细分析",
+    "## 冲突与差异分析",
+    "## 风险提示",
+    "## 结论与建议",
+  ].join("\n\n");
+  const result = evaluateReportQuality({
+    report,
+    evidence: [{
+      evidence_id: "E000001",
+      source_id: "S001",
+      subject: "比亚迪",
+      predicate: "销量",
+      object: "披露",
+      value: 100,
+      unit: "辆",
+      period: "2026-08",
+      scope: "月度",
+      evidence_type: "number",
+      locator: { page: 1 },
+      quote: "2026年8月销量100辆。",
+      confidence: 0.9,
+      source_authority: 5,
+    }],
+    conflicts: [],
+    sources: [{
+      source_id: "S001",
+      file_name: "公告.pdf",
+      file_type: "application/pdf",
+      source_title: "公告",
+      authority_level: 5,
+      parse_method: "manual",
+      parse_status: "ready",
+      char_count: 100,
+      chunk_count: 1,
+    }],
+    strictMode: true,
+  });
+
+  assert.equal(result.quality_status, "blocked");
+  assert.ok(result.blocking_reasons?.some((reason) => reason.includes("核心分析问题")));
 });

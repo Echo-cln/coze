@@ -6,6 +6,7 @@ import type {
   ConflictItem,
   CModuleOutput,
   WF60Output,
+  QualityMetrics,
 } from "@/lib/types";
 import {
   uploadAndGetSignedUrl,
@@ -148,6 +149,19 @@ export async function POST(req: NextRequest) {
 
         // —— Mock 模式：未配置 C 模块时 ——
         if (!cModuleUrl) {
+          const hasSubmittedMaterials =
+            fileEntries.length > 0 ||
+            (Array.isArray(parsedChunks) && parsedChunks.length > 0) ||
+            sourceUrls.length > 0 ||
+            kbQuery.trim().length > 0;
+          if (hasSubmittedMaterials) {
+            controller.enqueue(sendEvent("error", {
+              code: "WORKFLOW_NOT_CONFIGURED",
+              message: "当前未配置 C 模块工作流，无法分析你提交的材料。已停止演示数据回退，避免把样例内容误当成材料分析结果。",
+            }));
+            controller.close();
+            return;
+          }
           await runMockGeneration({
             controller,
             encoder,
@@ -426,6 +440,7 @@ export async function POST(req: NextRequest) {
           conflicts: allConflicts,
           sources: allSources,
           strictMode,
+          decisionQuestion,
           startedAt,
         });
 
@@ -449,6 +464,14 @@ export async function POST(req: NextRequest) {
           throw new Error(`冲突清单引用了不存在的证据：${invalidConflictRefs.join("、")}`);
         }
         controller.enqueue(sendEvent("metrics", metrics));
+        if (strictMode && metrics.quality_status === "blocked") {
+          controller.enqueue(sendEvent("error", {
+            code: "QUALITY_GATE_BLOCKED",
+            message: `严格模式质量闸门未通过：${(metrics.blocking_reasons || []).join("；")}`,
+          }));
+          controller.close();
+          return;
+        }
 
         controller.enqueue(sendEvent("progress", { step: 3, label: stepNames[3], status: "completed" }));
 
@@ -672,12 +695,13 @@ function buildSectionsFromEvidence(
     execSummary += "**核心发现：**\n\n";
     for (const m of topMetrics) {
       const val = m.value !== undefined && m.value !== null ? `${m.value}${m.unit ? " " + m.unit : ""}` : "已披露";
-      execSummary += `- **${m.subject}**：${val}（来源：${m.source_id}，置信度 ${(m.confidence * 100).toFixed(0)}%） [${m.evidence_id}]\n`;
+      const metricLabel = [m.subject, m.predicate].filter(Boolean).join(" · ") || "未命名指标";
+      execSummary += `- **${metricLabel}**：${val}（来源：${m.source_id}，置信度 ${(m.confidence * 100).toFixed(0)}%） [${m.evidence_id}]\n`;
     }
     execSummary += "\n";
   } else if (facts.length > 0) {
     execSummary += `本报告围绕「${decisionQuestion}」进行了系统性梳理，共形成 **${evidences.length}** 条可追溯证据条目，覆盖 **${new Set(evidences.map((e) => e.source_id)).size}** 个信息源。\n\n`;
-    execSummary += `**整体结论：** 现有证据链${conflicts.length > 0 ? "存在部分数据口径差异，需结合冲突雷达谨慎解读" : "相互印证，一致性较高"}，可作为专业决策的参考基础。\n\n`;
+    execSummary += `**证据范围：** 已整理 ${evidences.length} 条证据；来源条目数不代表独立来源数，证据数量和置信度不能替代事实核验。结论仅限于下文可追溯的材料。\n\n`;
   } else {
     execSummary += `基于现有材料，我们围绕「${decisionQuestion}」进行了系统化梳理。\n\n`;
     execSummary += `> **说明：** 当前材料中可直接抽取的量化证据有限，以下分析基于已有事实框架进行结构化呈现，后续可补充更多原始材料以获得更深入的洞察。\n\n`;
@@ -695,13 +719,14 @@ function buildSectionsFromEvidence(
   // —— 章节 2：核心指标速览 ——
   if (keyMetrics.length > 0) {
     let metricsMd = "以下关键指标均有原始材料支撑，每条数据标注了来源编号与置信度。\n\n";
-    metricsMd += "| 指标 | 数值 | 期间/范围 | 来源 | 置信度 |\n|------|------|----------|------|--------|\n";
+    metricsMd += "| 主体 / 指标 | 数值 | 期间 / 口径 | 来源 | 置信度 | 证据 ID |\n|------|------|----------|------|--------|----------|\n";
     for (const m of keyMetrics) {
       const val = m.value !== undefined && m.value !== null
         ? `${m.value}${m.unit ? " " + m.unit : ""}`
         : "—";
       const period = m.period || m.scope || "—";
-      metricsMd += `| ${m.subject} | ${val} | ${period} | ${m.source_id} | ${(m.confidence * 100).toFixed(0)}% |\n`;
+      const metricLabel = [m.subject, m.predicate].filter(Boolean).join(" · ") || "未命名指标";
+      metricsMd += `| ${metricLabel} | ${val} | ${period} | ${m.source_id} | ${(m.confidence * 100).toFixed(0)}% | [${m.evidence_id}] |\n`;
     }
     metricsMd += "\n*数据来源：各原始材料对应章节，详见证据地图。*\n";
     sections.push({
@@ -715,10 +740,10 @@ function buildSectionsFromEvidence(
   }
 
   // —— 章节 3：详细分析（按主题分组） ——
-  // 按 subject 对证据分组，每个主题作为一个子分析段落
+  // 按主体和指标分组，避免“公司”或“行业”成为空泛主题标题
   const subjectGroups = new Map<string, EvidenceItem[]>();
   for (const e of evidences) {
-    const key = e.subject || "其他";
+    const key = [e.subject, e.predicate].filter(Boolean).join(" · ") || "其他";
     if (!subjectGroups.has(key)) subjectGroups.set(key, []);
     subjectGroups.get(key)!.push(e);
   }
@@ -774,38 +799,41 @@ function buildSectionsFromEvidence(
         }
         analysisMd += "\n";
 
-        // 如果有多个数值，做对比和变化幅度分析
         if (numericItems.length >= 2) {
-          analysisMd += "**多源数据对比与差异分析：** ";
-          const values = numericItems.map((e) => `${e.value}${e.unit ? " " + e.unit : ""}`);
-          analysisMd += values.join(" ｜ ");
-          analysisMd += "。";
-
-          // 计算最大最小值差异
-          const nums = numericItems.map((e) => e.value as number);
-          const maxVal = Math.max(...nums);
-          const minVal = Math.min(...nums);
-          if (minVal !== 0 && maxVal !== minVal) {
-            const diffPct = ((maxVal - minVal) / Math.abs(minVal) * 100).toFixed(1);
-            analysisMd += ` 其中最大值与最小值相差 **${diffPct}%**，`;
+          const comparableGroups = new Map<string, EvidenceItem[]>();
+          for (const item of numericItems) {
+            const key = [
+              item.subject.trim().toLowerCase(),
+              item.predicate.trim().toLowerCase(),
+              item.unit || "",
+              item.currency || "",
+              item.period || "",
+              item.scope || "",
+            ].join("|");
+            const group = comparableGroups.get(key) || [];
+            group.push(item);
+            comparableGroups.set(key, group);
           }
-
-          const hasConflict = conflicts.some((c) =>
-            c.evidence_ids.some((id) => numericItems.some((ni) => ni.evidence_id === id)),
+          const multiSourceGroups = Array.from(comparableGroups.values()).filter(
+            (group) => new Set(group.map((item) => item.source_id)).size > 1,
           );
-          if (hasConflict) {
-            analysisMd += "不同来源数据存在口径差异（详见「冲突与口径差异」章节），建议以高权威来源为准或人工核验后引用。";
+          if (multiSourceGroups.length > 0) {
+            analysisMd += "**同口径多源核验：**\n\n";
+            for (const group of multiSourceGroups) {
+              const values = group.map((item) => `${item.value}${item.unit ? " " + item.unit : ""}（${item.source_id}）`).join("；");
+              analysisMd += `- ${group[0].subject} ${group[0].predicate}，期间 ${group[0].period || "未注明"}，口径 ${group[0].scope || "未注明"}：${values}。\n`;
+            }
+            analysisMd += "\n";
           } else {
-            analysisMd += "不同来源数据在方向上基本一致，可交叉印证，数据可信度较高。";
+            analysisMd += "**口径说明：** 本节数值涉及不同指标、期间或统计范围，不作横向大小比较；仅在主体、指标、单位、期间和口径一致时进行多源核验。\n\n";
           }
-          analysisMd += "\n\n";
         }
       }
 
       // 3. 交叉验证
       analysisMd += `#### ${subIdx}.3 交叉验证与证据强度\n\n`;
       const uniqueSources = new Set(items.map((e) => e.source_id));
-      analysisMd += `- **来源数量：** ${uniqueSources.size} 个独立来源\n`;
+      analysisMd += `- **来源条目数：** ${uniqueSources.size} 个（不等同于独立来源数）\n`;
       analysisMd += `- **证据条数：** ${items.length} 条\n`;
 
       // 按类型统计
@@ -828,42 +856,19 @@ function buildSectionsFromEvidence(
       }
       analysisMd += typeDescs.join("、") + "\n";
 
-      // 证据强度评级
-      let strength = "中";
-      if (items.length >= 5 && uniqueSources.size >= 3) strength = "高";
-      else if (items.length <= 2 && uniqueSources.size <= 1) strength = "较低";
-      analysisMd += `- **证据强度评级：** ${strength}（综合考虑来源独立性、数量与一致性）\n\n`;
+      analysisMd += "- **证据强度：** 未自动评级。来源独立性、原文真实性和抽取准确率需要基于原始材料评估，不能仅凭证据条数推断。\n\n";
 
-      // 4. 趋势研判与影响评估（行业差异化）
+      // 4. 趋势研判与影响评估：不从静态证据自动外推趋势、因果或投资影响
       analysisMd += `#### ${subIdx}.4 趋势研判与影响评估\n\n`;
-
-      if (industry === "finance") {
-        analysisMd += `从金融投研视角看，「${subject}」维度的变动对投资决策具有直接影响：\n\n`;
-        analysisMd += `- **对基本面的影响：** 若该指标持续向当前方向演化，将直接影响相关标的的盈利能力、现金流水平与估值中枢，建议纳入核心跟踪变量清单。\n`;
-        analysisMd += `- **对行业格局的影响：** 头部机构与中小机构的差距可能进一步扩大，行业集中度存在提升趋势，关注头部标的的竞争壁垒与定价权。\n`;
-        analysisMd += `- **对政策面的敏感性：** 该领域受监管政策影响较大，需持续关注政策风向变化及其对行业估值的系统性影响。\n`;
-        analysisMd += `- **风险提示：** 数据时效性与口径差异可能影响判断的准确性，严格模式下建议以原始公告和权威发布为准。\n\n`;
-      } else if (industry === "government") {
-        analysisMd += `从政务评估视角看，「${subject}」维度对政策制定与执行评估具有重要参考价值：\n\n`;
-        analysisMd += `- **政策执行效果：** 现有证据反映了该领域政策落地的阶段性成效，总体呈现稳中向好的态势，但部分细分指标仍有优化空间。\n`;
-        analysisMd += `- **民生影响评估：** 该维度的变化直接关系到群众获得感，建议持续跟踪并完善配套措施，确保政策红利精准落地。\n`;
-        analysisMd += `- **区域/部门差异：** 不同区域或部门的执行成效存在一定差异，建议总结先进经验并推广至后进区域，推动整体均衡发展。\n`;
-        analysisMd += `- **下一步工作建议：** 聚焦短板指标攻坚，建立长效跟踪机制，定期开展"回头看"评估，确保各项政策措施持续见效。\n\n`;
-      } else {
-        analysisMd += `从咨询诊断视角看，「${subject}」维度对企业战略决策与运营优化具有关键意义：\n\n`;
-        analysisMd += `- **市场机会评估：** 该维度的发展趋势指向了潜在的市场机会窗口，建议企业提前布局，抢占先发优势。\n`;
-        analysisMd += `- **竞争格局变化：** 行业参与者应关注竞争格局变化带来的挑战与机遇，及时调整战略定位，构建差异化竞争优势。\n`;
-        analysisMd += `- **运营优化方向：** 基于证据反映的现状，企业可在成本控制、效率提升、客户体验等方面寻找优化空间。\n`;
-        analysisMd += `- **战略建议：** 建议从"长—中—短"三个时间维度制定策略，长期锚定方向、中期配置资源、短期快速验证。\n\n`;
-      }
+      analysisMd += "本节证据可用于描述材料披露的事实，但若缺少连续期间数据、可比口径、竞争对手信息及估值参数，就不能据此推断趋势、因果关系或投资影响。相关结论留待补充材料后评估。\n\n";
 
       for (const e of items) allAnalysisEids.push(e.evidence_id);
     }
 
     // 全局分析总结
     analysisMd += `### 综合分析结论\n\n`;
-    analysisMd += `综合以上 ${subIdx} 个维度的证据交叉验证，我们认为整体证据链条**${subjectGroups.size >= 5 ? "较为完整" : "基本完整"}**，核心结论具有一定的支撑力度。同时需要注意的是，部分细分领域的证据密度仍有提升空间，建议在后续迭代中补充更多原始材料以提高分析的全面性与稳健性。\n\n`;
-    analysisMd += `> 注：以上分析基于现有证据自动生成，引用标注见「证据地图」页签，冲突提示见「冲突雷达」页签。严格模式下，所有结论均已标注证据来源，未作无依据推测。\n`;
+    analysisMd += "本节仅归纳已列示证据。证据链完整性、事实正确性和模型效果尚未通过独立评测，不能由本次结构检查推定。\n\n";
+    analysisMd += `> 注：请结合证据台账、原始材料和冲突登记逐项复核；未被材料覆盖的判断不在本报告结论范围内。\n`;
 
     sections.push({
       section_id: "sec_detailed_analysis",
@@ -928,19 +933,21 @@ function buildSectionsFromEvidence(
     risks.push("部分关键指标存在高风险数据口径差异，建议以高权威来源为准或人工核验后使用");
   }
   if (forecasts.length > 0) {
-    risks.push("前瞻性预测数据存在不确定性，实际结果可能因市场环境变化而偏离");
+    risks.push("报告包含预测性材料；预测不能视为已实现结果，需结合实际披露复核");
   }
   if (evidences.length < 3) {
-    risks.push("当前样本量有限，结论的稳健性需更多原始材料交叉验证");
+    risks.push("当前可追溯证据较少，结论范围应限制在材料明确披露的事实");
   }
-  risks.push("市场环境与政策变化可能对结论的时效性产生影响");
-  if (conflicts.some((c) => c.status !== "resolved")) {
-    risks.push("部分数据冲突尚未完全消解，严格模式下相关结论需审慎引用");
+  if (conflicts.some((c) => !c.resolved)) {
+    risks.push("存在尚未解决的数据差异，相关证据不应合并或据此作确定性判断");
+  }
+  if (risks.length === 0) {
+    risks.push("现有证据未触发结构化风险规则；这不代表不存在业务或市场风险");
   }
 
-  const riskMd = "根据证据质量评估与冲突检测结果，提示以下风险：\n\n" +
+  const riskMd = "以下仅列出本次证据与冲突检查实际触发的事项：\n\n" +
     risks.map((r, i) => `${i + 1}. **${r}**`).join("\n") +
-    "\n\n*建议在决策时综合考虑上述风险因素，并结合更多维度的信息进行判断。*\n";
+    "\n\n材料未覆盖的风险不在本节结论范围内。\n";
 
   sections.push({
     section_id: "sec_risks",
@@ -964,42 +971,22 @@ function buildSectionsFromEvidence(
   const keyFindings: string[] = [];
   const topEvidence = (highConfidenceEvidences.length > 0 ? highConfidenceEvidences : evidences).slice(0, 5);
   for (const ev of topEvidence) {
-    // 用三元组方式构建关键发现
-    const statement = `${ev.subject} ${ev.predicate} ${ev.object}` +
-      (ev.value !== undefined && ev.value !== null ? `（${ev.value}${ev.unit || ""}）` : "");
-    keyFindings.push(statement);
+    const claim = [ev.subject, ev.predicate, ev.object].filter((part) => part && part.trim()).join(" ");
+    const value = ev.value !== undefined && ev.value !== null ? `（${ev.value}${ev.unit || ""}）` : "";
+    keyFindings.push(`${claim || "已记录证据"}${value} [${ev.evidence_id}]`);
   }
-
-  // 核心判断逻辑：基于证据方向给出明确结论
-  const positiveSignals = evidences.filter((e) =>
-    e.predicate.includes("增长") || e.predicate.includes("提升") || e.predicate.includes("增加") ||
-    e.predicate.includes("超过") || e.predicate.includes("盈利") || e.predicate.includes("领先")
-  ).length;
-  const negativeSignals = evidences.filter((e) =>
-    e.predicate.includes("下降") || e.predicate.includes("减少") || e.predicate.includes("风险") ||
-    e.predicate.includes("亏损") || e.predicate.includes("低于") || e.predicate.includes("负债")
-  ).length;
-  const overallTone = positiveSignals > negativeSignals ? "positive" :
-    negativeSignals > positiveSignals ? "negative" : "neutral";
-
-  // 判断决策问题类型（用于针对性结论）
-  const dq = decisionQuestion || "";
-  const isFinance = industry === "finance" || dq.includes("融资") || dq.includes("投资") || dq.includes("估值") || dq.includes("上市");
-  const isGov = industry === "government" || dq.includes("政策") || dq.includes("监管") || dq.includes("规划");
-  const isConsulting = industry === "consulting" || dq.includes("战略") || dq.includes("市场") || dq.includes("竞争");
 
   if (audience === "management") {
     conclusionMd += "### 核心结论\n\n";
     conclusionMd += `针对「${decisionQuestion || "核心决策问题"}」，基于 ${evidences.length} 条有效证据的系统性分析，我们给出以下判断：\n\n`;
 
-    // 整体判断 - 直接回答问题
     const overallSentiment =
-      highConfidenceEvidences.length >= evidences.length * 0.6 && highRiskConflicts.length === 0
-        ? "**证据链整体支持正面判断**。核心指标相互印证，数据一致性较高，决策基础较为扎实。"
-        : highRiskConflicts.length > 0
-          ? "**当前证据存在关键分歧，暂不支持明确结论**。建议在重大决策前补充材料、核验高风险数据差异。"
-          : "**证据整体方向基本一致，但支撑力度有待加强**。部分维度数据覆盖不足，建议审慎决策。";
-    conclusionMd += `**整体判断：** ${overallSentiment}\n\n`;
+      highRiskConflicts.length > 0
+        ? "关键证据仍存在未解决的高风险差异，当前材料不足以形成确定性判断。"
+        : highConfidenceEvidences.length < 3
+          ? "可确认的证据数量有限，本报告只归纳材料明确披露的事实，不据此推断投资、融资或政策结论。"
+          : "报告结论仅限于已列明且可追溯的证据；证据置信度不等同于事实正确率，也不代表各指标相互印证。";
+    conclusionMd += `**证据边界：** ${overallSentiment}\n\n`;
 
     // 关键依据
     if (keyFindings.length > 0) {
@@ -1023,43 +1010,12 @@ function buildSectionsFromEvidence(
       conclusionMd += "\n";
     }
 
-    // 针对性行动建议
-    conclusionMd += "### 行动建议\n\n";
-    if (isFinance) {
-      conclusionMd += "1. **决策建议**：";
-      if (highRiskConflicts.length === 0 && highConfidenceEvidences.length >= 3) {
-        conclusionMd += "在补充尽职调查的前提下，可推进本轮融资的初步评估";
-      } else if (highRiskConflicts.length > 0) {
-        conclusionMd += "建议暂缓决策，先完成高风险数据项的核验与补充";
-      } else {
-        conclusionMd += "建议进一步收集关键数据后再做判断";
-      }
-      conclusionMd += "\n";
-      conclusionMd += "2. **下一步重点**：补充财务数据、业务指标、市场规模等核心维度证据，完善决策基础\n";
-      conclusionMd += "3. **风险缓释**：对冲突登记中的高风险项逐一核实，必要时要求提供原始凭证\n";
-      conclusionMd += "4. **持续跟踪**：建立关键指标动态监控机制，及时掌握变化趋势\n";
-    } else if (isGov) {
-      conclusionMd += "1. **决策建议**：基于现有证据，";
-      conclusionMd += highRiskConflicts.length === 0 ? "政策方向基本明确，可推进下一步工作" : "存在关键数据分歧，建议补充调研后再决策";
-      conclusionMd += "\n";
-      conclusionMd += "2. **数据完善**：优先补充官方统计口径数据，提升证据权威性\n";
-      conclusionMd += "3. **多方印证**：对重要结论进行跨部门、跨数据源交叉验证\n";
-      conclusionMd += "4. **预案准备**：针对不确定性因素，提前制定备选方案\n";
-    } else if (isConsulting) {
-      conclusionMd += "1. **战略判断**：";
-      conclusionMd += highConfidenceEvidences.length >= 3 ? "市场信号较为明确，可基于现有判断制定策略" : "市场信号尚不明朗，建议扩大调研范围";
-      conclusionMd += "\n";
-      conclusionMd += "2. **竞争分析**：建议补充竞品对比、市场份额等维度数据\n";
-      conclusionMd += "3. **落地路径**：基于结论制定分阶段行动计划，明确里程碑指标\n";
-      conclusionMd += "4. **风险预案**：识别关键假设，建立敏感性分析框架\n";
-    } else {
-      conclusionMd += "1. **决策建议**：基于当前证据水平，";
-      conclusionMd += highRiskConflicts.length === 0 ? "可在审慎评估后推进决策" : "建议暂缓决策，待关键差异核实后再判断";
-      conclusionMd += "\n";
-      conclusionMd += "2. **优先核验高风险数据差异项**，必要时补充原始材料进行人工确认\n";
-      conclusionMd += "3. **补充关键维度证据**，完善决策信息基础\n";
-      conclusionMd += "4. **建立定期复核机制**，跟踪核心指标的后续变化\n";
+    conclusionMd += "### 后续核验事项\n\n";
+    if (highRiskConflicts.length > 0) {
+      conclusionMd += "- 优先核对未解决的高风险冲突及其原始出处。\n";
     }
+    conclusionMd += "- 对每项关键数据确认主体、指标、期间、单位和统计范围。\n";
+    conclusionMd += "- 如需作投资、融资或政策决策，应补充与决策问题直接相关的原始材料和分析；本报告不自动给出交易或审批建议。\n";
   } else if (audience === "analyst") {
     conclusionMd += "### 专业结论\n\n";
     conclusionMd += `基于前述系统分析，针对「${decisionQuestion || "核心问题"}」形成如下专业判断：\n\n`;
@@ -1219,7 +1175,7 @@ async function generateReportWithLLM(
       }).join("\n")
     : "无";
 
-  const systemPrompt = `你是一位资深的${industryLabels[industry] || "专业"}分析师，擅长基于多源证据撰写深度研究报告。
+  const systemPrompt = `你是一位严谨的${industryLabels[industry] || "专业"}分析师，负责把材料中的事实、来源、差异和不确定性写清楚。
 
 你的写作风格：
 - 专业、严谨、有深度，不做空洞表态
@@ -1227,7 +1183,7 @@ async function generateReportWithLLM(
 - 结构清晰，分章节论述，逻辑层次分明
 - 分析要有洞察，不只是罗列事实
 - 中文表达专业流畅，符合行业规范
-- 总字数不少于 4000 字
+- 报告长度由证据量决定：通常 800–1800 字；材料不足时必须简短说明缺口，不得扩写套话
 - 结论与建议必须直接、明确地回答核心决策问题，给出有证据支撑的判断，严禁空洞套话和答非所问
 
 报告必须包含以下章节（用 Markdown 格式）：
@@ -1240,10 +1196,14 @@ async function generateReportWithLLM(
 7. 质量说明 — 报告可信度与局限性说明
 
 写作要求：
-- 详细分析部分要有深度，每个小节至少 400 字
-- 用事实说话，基于证据展开推理，不要凭空臆造
-- 适当引用原文片段作为论据支撑
-- 用 [证据编号] 标注关键论断的出处
+- 只陈述证据库和冲突登记明确支持的事实；不得补入训练记忆、外部常识或虚构数据
+- 每个事实性句子、数字、同比、因果判断和建议都必须在同一段落附上对应的 [证据编号]
+- 证据只支持原文明确披露的内容；不得把相关性改写成因果，不得把预测写成已实现结果
+- 不同主体、指标、单位、期间或统计口径的数据不得直接比较或合并；如口径不同，分别列示并解释
+- 证据未覆盖投资结论、融资可行性、估值或政策建议时，必须明确写“现有材料不足以判断”
+- 不得生成“正面判断”“可信度较高”等整体评价，除非给出明确、可复核的证据标准
+- 禁止输出 undefined、null、待填写等占位内容
+- 适当引用原文片段并保留来源名和定位
 - 不要写"以下是报告"之类的引导语，直接输出正文
 - 输出纯 Markdown，不要用代码块包裹`;
 
@@ -1252,12 +1212,12 @@ async function generateReportWithLLM(
 行业方向：${industryLabels[industry] || industry}
 
 【证据库】共 ${evidences.length} 条有效证据：
-${evidenceText || "（暂无具体证据条目，将基于决策问题进行框架性分析）"}
+${evidenceText || "（暂无已核验的证据；只说明资料缺口，不得据此生成事实结论）"}
 
 【冲突登记】共 ${conflicts.length} 项：
 ${conflictText}
 
-请基于以上证据，撰写一份完整、专业、有深度的分析报告。`;
+严格按证据边界撰写。没有证据支持的内容请删除，不要为了达到篇幅而补充通用分析。`;
 
   let fullReport = "";
   let streamClosed = false;
@@ -1597,300 +1557,102 @@ async function runMockGeneration(params: {
   decisionQuestion: string;
   strictMode: boolean;
 }) {
-  const { controller, encoder, industry, decisionQuestion, strictMode } = params;
-  const startedAt = Date.now();
-
+  const { controller, encoder, industry, decisionQuestion } = params;
   const sendEvent = (event: string, data: unknown) => {
     controller.enqueue(
-      encoder.encode(
-        `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
-      ),
+      encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
     );
   };
 
-  const steps = ["信息校验", "证据抽取", "冲突检测", "报告撰写", "合规审计"];
-  let sampleReportText = "";
-  let mockEvidenceForAudit: EvidenceItem[] = [];
-  let mockConflictsForAudit: ConflictItem[] = [];
-
-  for (let i = 0; i < steps.length; i++) {
-    sendEvent("progress", {
-      step: i,
-      label: steps[i],
-      status: "running",
-    });
-    await new Promise((r) => setTimeout(r, 600));
-
-    if (i === 1) {
-      // 模拟证据
-      const mockEvidence = [
-        {
-          evidence_id: "E000001",
-          source_id: "S001",
-          source_title: "2025年度报告",
-          subject: "公司",
-          predicate: "营业收入",
-          object: "",
-          value: "100.5",
-          unit: "亿元",
-          period: "2025FY",
-          scope: "合并报表",
-          evidence_type: "number",
-          locator: { page: 12, section: "财务摘要" },
-          quote: "2025年度公司实现营业收入100.5亿元，同比增长15.3%。",
-          confidence: 0.98,
-          source_authority: 5,
-        },
-        {
-          evidence_id: "E000002",
-          source_id: "S001",
-          source_title: "2025年度报告",
-          subject: "公司",
-          predicate: "净利润",
-          object: "",
-          value: "25.8",
-          unit: "亿元",
-          period: "2025FY",
-          scope: "归母净利润",
-          evidence_type: "number",
-          locator: { page: 15, table: "表3.2" },
-          quote: "归属于母公司股东的净利润为25.8亿元，同比增长12.1%。",
-          confidence: 0.97,
-          source_authority: 5,
-        },
-      ];
-      mockEvidenceForAudit = mockEvidence as unknown as EvidenceItem[];
-      for (const ev of mockEvidence) {
-        sendEvent("evidence", ev);
-      }
-    }
-
-    if (i === 3) {
-      // 用结构化模板生成内容丰富的专业报告
-      const mockEvidenceForReport = [
-        {
-          evidence_id: "E000001",
-          source_id: "S001",
-          source_title: "2025年度报告",
-          subject: "公司",
-          predicate: "营业收入",
-          value: "100.5",
-          unit: "亿元",
-          period: "2025FY",
-          scope: "合并报表",
-          evidence_type: "number",
-          quote: "2025年度公司实现营业收入100.5亿元，同比增长15.3%，主要受益于主营业务收入的稳健增长以及新兴业务板块的快速放量。",
-          confidence: 0.98,
-          source_authority: 5,
-          topic: "财务表现",
-        },
-        {
-          evidence_id: "E000002",
-          source_id: "S001",
-          source_title: "2025年度报告",
-          subject: "公司",
-          predicate: "归母净利润",
-          value: "25.8",
-          unit: "亿元",
-          period: "2025FY",
-          scope: "归母净利润",
-          evidence_type: "number",
-          quote: "归属于母公司股东的净利润为25.8亿元，同比增长12.1%，扣非净利润为23.2亿元，同比增长14.5%，盈利质量持续提升。",
-          confidence: 0.97,
-          source_authority: 5,
-          topic: "财务表现",
-        },
-        {
-          evidence_id: "E000003",
-          source_id: "S002",
-          source_title: "行业研究报告",
-          subject: "行业",
-          predicate: "市场规模",
-          value: "5000",
-          unit: "亿元",
-          period: "2025E",
-          scope: "全行业",
-          evidence_type: "number",
-          quote: "预计2025年全行业市场规模将达到5000亿元，同比增长18%，其中头部企业市场份额持续提升，行业集中度进一步提高。",
-          confidence: 0.92,
-          source_authority: 4,
-          topic: "行业格局",
-        },
-        {
-          evidence_id: "E000004",
-          source_id: "S002",
-          source_title: "行业研究报告",
-          subject: "公司",
-          predicate: "市场份额",
-          value: "8.5",
-          unit: "%",
-          period: "2025H1",
-          scope: "全渠道口径",
-          evidence_type: "number",
-          quote: "公司2025年上半年全渠道市场份额约为8.5%，位列行业前三，较去年同期提升0.8个百分点。",
-          confidence: 0.90,
-          source_authority: 4,
-          topic: "行业格局",
-        },
-        {
-          evidence_id: "E000005",
-          source_id: "S003",
-          source_title: "第三方数据",
-          subject: "公司",
-          predicate: "市场份额",
-          value: "6.2",
-          unit: "%",
-          period: "2025H1",
-          scope: "上市业务口径",
-          evidence_type: "number",
-          quote: "上市公司主体2025年上半年市场份额为6.2%，若包含非上市业务板块预计份额更高。",
-          confidence: 0.88,
-          source_authority: 3,
-          topic: "行业格局",
-        },
-        {
-          evidence_id: "E000006",
-          source_id: "S001",
-          source_title: "2025年度报告",
-          subject: "公司",
-          predicate: "研发投入",
-          value: "8.6",
-          unit: "亿元",
-          period: "2025FY",
-          scope: "研发费用",
-          evidence_type: "number",
-          quote: "全年研发投入8.6亿元，同比增长28.7%，研发费用率提升至8.6%，重点投向核心技术攻关和新产品开发。",
-          confidence: 0.96,
-          source_authority: 5,
-          topic: "技术创新",
-        },
-        {
-          evidence_id: "E000007",
-          source_id: "S004",
-          source_title: "公司公告",
-          subject: "公司",
-          predicate: "新业务占比",
-          value: "23.5",
-          unit: "%",
-          period: "2025FY",
-          scope: "营收占比",
-          evidence_type: "number",
-          quote: "新业务板块营收占比从去年的15.2%提升至23.5%，业务结构持续优化，第二增长曲线初步成型。",
-          confidence: 0.95,
-          source_authority: 4,
-          topic: "业务布局",
-        },
-        {
-          evidence_id: "E000008",
-          source_id: "S002",
-          source_title: "行业研究报告",
-          subject: "行业",
-          predicate: "增长率",
-          value: "18",
-          unit: "%",
-          period: "2025E",
-          scope: "同比增长",
-          evidence_type: "number",
-          quote: "行业整体保持高速增长态势，预计未来三年复合增长率维持在15-20%区间，政策红利与技术创新双轮驱动。",
-          confidence: 0.91,
-          source_authority: 4,
-          topic: "行业趋势",
-        },
-      ];
-      const normalizedMockEvidenceForReport = mockEvidenceForReport.map((item) => ({
-        ...item,
-        locator: { section: item.topic || "来源材料" },
-      }));
-      const mockConflictsForReport: ConflictItem[] = [
-        {
-          conflict_id: "CF001",
-          evidence_ids: ["E000004", "E000005"],
-          conflict_type: "definition",
-          severity: "medium" as const,
-          summary: "市场份额统计口径存在差异",
-          explanation:
-            "一处来源使用全渠道可比口径（S002，8.5%），另一处使用上市业务口径（S003，6.2%），两者统计范围不同导致数值差异。",
-          resolution: "preserve_both" as const,
-          resolved: true,
-        },
-      ];
-      mockEvidenceForAudit = normalizedMockEvidenceForReport as unknown as EvidenceItem[];
-      mockConflictsForAudit = mockConflictsForReport as unknown as ConflictItem[];
-      for (const evidenceItem of normalizedMockEvidenceForReport) {
-        sendEvent("evidence", evidenceItem);
-      }
-      for (const conflictItem of mockConflictsForReport) {
-        sendEvent("conflict", conflictItem);
-      }
-
-      const sections = buildSectionsFromEvidence(
-        normalizedMockEvidenceForReport as unknown as EvidenceItem[],
-        mockConflictsForReport,
-        decisionQuestion,
-        industry,
-        "management",
-      );
-      sampleReportText = buildReportFromSections(
-        sections,
-        decisionQuestion,
-        industry,
-      );
-
-      // 分段流式发送（打字机效果）
-      const chunks = sampleReportText.match(/.{1,80}/g) || [sampleReportText];
-      let fullText = "";
-      for (const chunk of chunks) {
-        fullText += chunk;
-        sendEvent("content", { delta: chunk, text: fullText });
-        await new Promise((r) => setTimeout(r, 20));
-      }
-    }
-
-    sendEvent("progress", {
-      step: i,
-      label: steps[i],
-      status: "completed",
-    });
+  const steps = ["演示说明", "材料检查", "证据抽取", "报告生成", "质量检查"];
+  for (let step = 0; step < steps.length; step++) {
+    sendEvent("progress", { step, label: steps[step], status: "running" });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    sendEvent("progress", { step, label: steps[step], status: "completed" });
   }
 
-  const finalMetrics = evaluateReportQuality({
-    report: sampleReportText,
-    evidence: mockEvidenceForAudit,
-    conflicts: mockConflictsForAudit,
+  const report = `# EvidenceOS 报告演示
+
+> **演示模式：** 当前未连接真实工作流；以下仅展示报告结构，不含真实材料分析或投资判断。
+> **分析问题：** ${decisionQuestion.trim() || "尚未填写"}
+
+---
+
+## 目录
+
+1. [执行摘要](#sec_exec_summary)
+2. [核心指标概览](#sec_key_metrics)
+3. [详细分析](#sec_detailed_analysis)
+4. [冲突与差异分析](#sec_conflicts)
+5. [风险提示](#sec_risks)
+6. [结论与建议](#sec_conclusion)
+
+---
+
+## 执行摘要
+
+工作流未连接，系统没有解析或核验任何材料。本演示不包含公司事实、财务数据、行业判断或投资建议。
+
+## 核心指标概览
+
+暂无已核验证据。连接材料解析与证据抽取工作流后，指标表将显示原文、来源、期间、口径及定位。
+
+## 详细分析
+
+暂无材料分析。配置真实工作流并提交材料后，报告将按可追溯证据展开；资料不足时应保留缺口，不以通用文字补齐。
+
+## 冲突与差异分析
+
+暂无可核验的证据对，无法判断是否存在数据冲突。
+
+## 风险提示
+
+当前为演示输出，不可用于投资、融资、审批或其他实际决策。
+
+## 结论与建议
+
+现有材料不足以形成结论。请先配置 C 模块工作流，再提交材料并填写核心分析问题。
+
+---
+
+## 质量说明
+
+这是演示输出，不代表材料解析、证据抽取、事实核验或模型效果已经完成。\n`;
+
+  for (const chunk of report.match(/.{1,160}/g) || [report]) {
+    sendEvent("content", { delta: chunk, text: chunk });
+  }
+
+  const checked = evaluateReportQuality({
+    report,
+    evidence: [],
+    conflicts: [],
     sources: [],
-    strictMode,
-    startedAt,
+    strictMode: false,
+    decisionQuestion,
     measurementMode: "demo",
   });
-  sendEvent("metrics", finalMetrics);
+  const metrics: QualityMetrics = {
+    ...checked,
+    quality_status: "review_required",
+    blocking_reasons: ["演示模式：没有连接工作流，也没有分析用户材料"],
+    measurement_mode: "demo",
+  };
+  sendEvent("metrics", metrics);
 
-  // 生成真实可下载的导出文件
-  let exportUrls: { pdf: string; docx: string; markdown: string } = {
+  const exportUrls: { pdf: string; docx: string; markdown: string } = {
     pdf: "",
     docx: "",
-    markdown: "",
+    markdown: `data:text/markdown;charset=utf-8,${encodeURIComponent(report)}`,
   };
-  try {
-    const generated = await generateExportFiles(sampleReportText, industry);
-    exportUrls = {
-      pdf: generated.pdf || "",
-      docx: generated.docx || "",
-      markdown: generated.markdown || "",
-    };
-  } catch {
-    // 失败时降级为 data URL
-    exportUrls.markdown =
-      "data:text/markdown;charset=utf-8," +
-      encodeURIComponent(sampleReportText);
-  }
-
   sendEvent("done", {
     ok: true,
-    report_markdown: sampleReportText,
+    demo: true,
+    report_markdown: report,
     export_urls: exportUrls,
-    evidence_ledger: mockEvidenceForAudit,
-    conflict_register: mockConflictsForAudit,
+    evidence_ledger: [],
+    conflict_register: [],
     source_manifest: [],
-    quality_metrics: finalMetrics,
+    quality_metrics: metrics,
   });
 }
