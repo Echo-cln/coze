@@ -60,3 +60,15 @@ test("multipart parsing enforces a streaming byte limit even without Content-Len
   assert.equal(valid.ok, true);
   if (valid.ok) assert.equal(valid.value.get("source_urls"), "[]");
 });
+
+test("report inline rendering formats bold text and safe table-of-contents links", () => {
+  const rendered = renderInlineSafe("**加粗** [执行摘要](#sec_exec_summary) &nbsp;");
+  assert.match(rendered, /<strong[^>]*>加粗<\/strong>/);
+  assert.match(rendered, /href="#sec_exec_summary"/);
+  assert.doesNotMatch(rendered, /&amp;nbsp;/);
+});
+
+test("report fragment links reject attribute injection", () => {
+  const rendered = renderInlineSafe('[x](#ok" onclick="alert(1))');
+  assert.doesNotMatch(rendered, /onclick=/i);
+});

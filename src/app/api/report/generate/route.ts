@@ -13,7 +13,7 @@ import {
 } from "@/lib/storage";
 import { evaluateReportQuality } from "@/lib/quality";
 import { exceedsContentLength, isRecord, MAX_JSON_REQUEST_BYTES, MAX_TOTAL_UPLOAD_BYTES, normalizePublicHttpUrls, readFormDataWithLimit, readJsonWithLimit, validateFiles } from "@/lib/request-validation";
-import { escapeHtml } from "@/lib/safe-markdown";
+import { escapeHtml, sanitizeHref } from "@/lib/safe-markdown";
 
 export const runtime = "nodejs";
 export const maxDuration = 900; // 长任务
@@ -1403,6 +1403,11 @@ code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: "
 `;
 
     // 简易 Markdown 渲染
+    const tocTargets = new Map<string, string>();
+    for (const match of reportMarkdown.matchAll(/^\s*\d+\.\s+\[([^\]]+)\]\(#([^)]+)\)\s*$/gm)) {
+      const target = match[2].replace(/[^\p{L}\p{N}_-]/gu, "-");
+      if (target) tocTargets.set(match[1].trim(), target);
+    }
     let htmlBody = reportMarkdown;
     // 转义 HTML 特殊字符
     htmlBody = htmlBody.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -1416,6 +1421,11 @@ code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: "
     htmlBody = htmlBody.replace(/^### (.*)$/gm, "<h3>$1</h3>");
     htmlBody = htmlBody.replace(/^## (.*)$/gm, "<h2>$1</h2>");
     htmlBody = htmlBody.replace(/^# (.*)$/gm, "<h1>$1</h1>");
+    htmlBody = htmlBody.replace(/^<h2>(.*?)<\/h2>$/gm, (_match, heading: string) => {
+      const plainHeading = heading.replace(/[*_~]/g, "").trim();
+      const id = tocTargets.get(plainHeading);
+      return id ? `<h2 id="${escapeHtml(id)}">${heading}</h2>` : `<h2>${heading}</h2>`;
+    });
     // 粗体
     htmlBody = htmlBody.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     htmlBody = htmlBody.replace(/__(.+?)__/g, "<strong>$1</strong>");
@@ -1423,6 +1433,10 @@ code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: "
     htmlBody = htmlBody.replace(/\*(.+?)\*/g, "<em>$1</em>");
     // 行内代码
     htmlBody = htmlBody.replace(/`(.+?)`/g, "<code>$1</code>");
+    htmlBody = htmlBody.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label: string, href: string) => {
+      const safeHref = sanitizeHref(href.replace(/&amp;/g, "&"));
+      return safeHref ? `<a href="${safeHref}" rel="noopener noreferrer">${label}</a>` : label;
+    });
     // 引用
     htmlBody = htmlBody.replace(/^&gt; (.*)$/gm, "<blockquote>$1</blockquote>");
     // 分割线
@@ -1783,6 +1797,10 @@ async function runMockGeneration(params: {
           topic: "行业趋势",
         },
       ];
+      const normalizedMockEvidenceForReport = mockEvidenceForReport.map((item) => ({
+        ...item,
+        locator: item.locator ?? { section: item.topic || "来源材料" },
+      }));
       const mockConflictsForReport: ConflictItem[] = [
         {
           conflict_id: "CF001",
@@ -1796,9 +1814,9 @@ async function runMockGeneration(params: {
           resolved: true,
         },
       ];
-      mockEvidenceForAudit = mockEvidenceForReport as unknown as EvidenceItem[];
+      mockEvidenceForAudit = normalizedMockEvidenceForReport as unknown as EvidenceItem[];
       mockConflictsForAudit = mockConflictsForReport as unknown as ConflictItem[];
-      for (const evidenceItem of mockEvidenceForReport) {
+      for (const evidenceItem of normalizedMockEvidenceForReport) {
         sendEvent("evidence", evidenceItem);
       }
       for (const conflictItem of mockConflictsForReport) {
@@ -1806,7 +1824,7 @@ async function runMockGeneration(params: {
       }
 
       const sections = buildSectionsFromEvidence(
-        mockEvidenceForReport as unknown as EvidenceItem[],
+        normalizedMockEvidenceForReport as unknown as EvidenceItem[],
         mockConflictsForReport,
         decisionQuestion,
         industry,

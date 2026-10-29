@@ -106,7 +106,17 @@ function getSeverityBadgeVariant(sev: ConflictItem["severity"]) {
 
 // ===== 渲染简易 Markdown =====
 function renderMarkdown(text: string) {
-  const lines = text.split("\n");
+  const normalizedText = text.replace(/\r\n?/g, "\n");
+  const lines = normalizedText.split("\n");
+  const tocTargets = new Map<string, string>();
+  for (const match of normalizedText.matchAll(/^\s*\d+\.\s+\[([^\]]+)\]\(#([^)]+)\)\s*$/gm)) {
+    const target = match[2].replace(/[^\p{L}\p{N}_-]/gu, "-");
+    if (target) tocTargets.set(match[1].trim(), target);
+  }
+  const headingId = (title: string) => {
+    const plain = title.replace(/[*_~]/g, "").trim();
+    return tocTargets.get(plain) || plain.toLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, "-") || "report-section";
+  };
   const elements: React.ReactNode[] = [];
   let inList = false;
   let listType: "ul" | "ol" = "ul";
@@ -144,20 +154,20 @@ function renderMarkdown(text: string) {
                     key={hi}
                     className="px-2 py-1.5 text-left font-medium text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
                   >
-                    {h.trim()}
+                    <span dangerouslySetInnerHTML={{ __html: renderInline(h.trim()) }} />
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {rows.slice(1).map((row, ri) => (
+              {rows.map((row, ri) => (
                 <tr key={ri} className="border-b border-slate-100 dark:border-slate-800">
                   {row.map((cell, ci) => (
                     <td
                       key={ci}
                       className="px-2 py-1.5 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
                     >
-                      {cell.trim()}
+                      <span dangerouslySetInnerHTML={{ __html: renderInline(cell.trim()) }} />
                     </td>
                   ))}
                 </tr>
@@ -191,14 +201,27 @@ function renderMarkdown(text: string) {
       flushTable(idx);
     }
 
-    if (trimmed.startsWith("### ")) {
+    if (/^######\s/.test(trimmed)) {
+      flushList(idx);
+      const title = trimmed.replace(/^######\s+/, "").replace(/\s+#+$/, "");
+      elements.push(<h6 key={idx} id={headingId(title)} className="text-xs font-semibold text-slate-700 dark:text-slate-300 mt-3 mb-1"><span dangerouslySetInnerHTML={{ __html: renderInline(title) }} /></h6>);
+    } else if (/^#####\s/.test(trimmed)) {
+      flushList(idx);
+      const title = trimmed.replace(/^#####\s+/, "").replace(/\s+#+$/, "");
+      elements.push(<h5 key={idx} id={headingId(title)} className="text-sm font-medium text-slate-800 dark:text-slate-200 mt-3 mb-1"><span dangerouslySetInnerHTML={{ __html: renderInline(title) }} /></h5>);
+    } else if (/^####\s/.test(trimmed)) {
+      flushList(idx);
+      const title = trimmed.replace(/^####\s+/, "").replace(/\s+#+$/, "");
+      elements.push(<h4 key={idx} id={headingId(title)} className="text-sm font-semibold text-slate-800 dark:text-slate-200 mt-4 mb-1.5"><span dangerouslySetInnerHTML={{ __html: renderInline(title) }} /></h4>);
+    } else if (trimmed.startsWith("### ")) {
       flushList(idx);
       elements.push(
         <h3
           key={idx}
+          id={headingId(trimmed.slice(4))}
           className="text-sm font-semibold text-slate-800 dark:text-slate-200 mt-4 mb-2"
         >
-          {trimmed.slice(4)}
+          <span dangerouslySetInnerHTML={{ __html: renderInline(trimmed.slice(4)) }} />
         </h3>
       );
     } else if (trimmed.startsWith("## ")) {
@@ -206,9 +229,10 @@ function renderMarkdown(text: string) {
       elements.push(
         <h2
           key={idx}
+          id={headingId(trimmed.slice(3))}
           className="text-base font-semibold text-slate-900 dark:text-slate-100 mt-5 mb-2.5 pb-1 border-b border-slate-200 dark:border-slate-800"
         >
-          {trimmed.slice(3)}
+          <span dangerouslySetInnerHTML={{ __html: renderInline(trimmed.slice(3)) }} />
         </h2>
       );
     } else if (trimmed.startsWith("# ")) {
@@ -216,9 +240,10 @@ function renderMarkdown(text: string) {
       elements.push(
         <h1
           key={idx}
+          id={headingId(trimmed.slice(2))}
           className="text-lg font-bold text-slate-900 dark:text-slate-100 mb-3"
         >
-          {trimmed.slice(2)}
+          <span dangerouslySetInnerHTML={{ __html: renderInline(trimmed.slice(2)) }} />
         </h1>
       );
     } else if (trimmed.startsWith("- ") || trimmed.match(/^\d+\.\s/)) {
@@ -252,16 +277,6 @@ function renderMarkdown(text: string) {
         >
           <span dangerouslySetInnerHTML={{ __html: renderInline(trimmed.slice(2)) }} />
         </blockquote>
-      );
-    } else if (trimmed.startsWith("*") && trimmed.endsWith("*")) {
-      flushList(idx);
-      elements.push(
-        <p
-          key={idx}
-          className="text-xs italic text-slate-500 dark:text-slate-400 mt-2"
-        >
-          {trimmed.slice(1, -1)}
-        </p>
       );
     } else {
       flushList(idx);
@@ -337,6 +352,9 @@ function QualityGauge({
 // ===== 证据项可折叠卡片 =====
 function EvidenceCard({ item }: { item: EvidenceItem }) {
   const [expanded, setExpanded] = useState(false);
+  const locator = item.locator ?? {};
+  const confidence = Number.isFinite(item.confidence) ? Math.min(1, Math.max(0, item.confidence)) : null;
+  const authority = Number.isFinite(item.source_authority) ? Math.max(0, Math.min(5, Math.floor(item.source_authority))) : 0;
 
   const typeColor: Record<string, string> = {
     fact: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
@@ -383,7 +401,7 @@ function EvidenceCard({ item }: { item: EvidenceItem }) {
         </div>
         <div className="text-right flex-shrink-0">
           <span className="text-[10px] text-slate-400 font-mono">
-            置信度 {(item.confidence * 100).toFixed(0)}%
+            置信度 {confidence === null ? "—" : (confidence * 100).toFixed(0) + "%"}
           </span>
         </div>
       </button>
@@ -393,9 +411,9 @@ function EvidenceCard({ item }: { item: EvidenceItem }) {
             <div>
               <span className="text-slate-400">定位：</span>
               <span className="text-slate-600 dark:text-slate-400 font-mono">
-                {item.locator.section}
-                {item.locator.page ? ` · p.${item.locator.page}` : ""}
-                {item.locator.table ? ` · ${item.locator.table}` : ""}
+                {locator.section || locator.table || "未提供定位"}
+                {typeof locator.page === "number" && locator.page > 0 ? ` · p.${locator.page}` : ""}
+                {locator.table && locator.table !== locator.section ? ` · ${locator.table}` : ""}
               </span>
             </div>
             <div>
@@ -415,7 +433,7 @@ function EvidenceCard({ item }: { item: EvidenceItem }) {
             <div>
               <span className="text-slate-400">来源等级：</span>
               <span className="text-slate-600 dark:text-slate-400 font-mono">
-                {"★".repeat(item.source_authority)}
+                {"★".repeat(authority)}
               </span>
             </div>
           </div>
