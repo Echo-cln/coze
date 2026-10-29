@@ -26,7 +26,7 @@ import {
   AlertCircle,
   ShieldCheck,
   Clock,
-  Map,
+  Map as MapIcon,
   Radar,
   Gauge,
   FileCheck,
@@ -108,7 +108,7 @@ function getSeverityBadgeVariant(sev: ConflictItem["severity"]) {
 function renderMarkdown(text: string) {
   const normalizedText = text.replace(/\r\n?/g, "\n");
   const lines = normalizedText.split("\n");
-  const tocTargets = new Map<string, string>();
+  const tocTargets = new globalThis.Map<string, string>();
   for (const match of normalizedText.matchAll(/^\s*\d+\.\s+\[([^\]]+)\]\(#([^)]+)\)\s*$/gm)) {
     const target = match[2].replace(/[^\p{L}\p{N}_-]/gu, "-");
     if (target) tocTargets.set(match[1].trim(), target);
@@ -727,7 +727,7 @@ export function ReportPanel({
                 报告
               </TabsTrigger>
               <TabsTrigger value="evidence" className="text-xs gap-1.5 h-7">
-                <Map className="h-3.5 w-3.5" />
+                <MapIcon className="h-3.5 w-3.5" />
                 证据地图
                 {hasEvidence && (
                   <Badge variant="secondary" className="ml-0.5 h-4 px-1 text-[9px] font-mono">
@@ -828,7 +828,7 @@ export function ReportPanel({
                     </div>
                   ) : (
                     <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-                      <Map className="h-12 w-12 mb-3 opacity-30" />
+                      <MapIcon className="h-12 w-12 mb-3 opacity-30" />
                       <p className="text-sm">证据台账为空</p>
                       <p className="text-xs mt-1 text-slate-500">
                         解析完成后将自动抽取结构化证据

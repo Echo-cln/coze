@@ -1799,7 +1799,7 @@ async function runMockGeneration(params: {
       ];
       const normalizedMockEvidenceForReport = mockEvidenceForReport.map((item) => ({
         ...item,
-        locator: item.locator ?? { section: item.topic || "来源材料" },
+        locator: { section: item.topic || "来源材料" },
       }));
       const mockConflictsForReport: ConflictItem[] = [
         {
