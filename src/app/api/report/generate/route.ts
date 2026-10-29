@@ -151,7 +151,7 @@ export async function POST(req: NextRequest) {
         if (!cModuleUrl) {
           const hasSubmittedMaterials =
             fileEntries.length > 0 ||
-            (Array.isArray(parsedChunks) && parsedChunks.length > 0) ||
+            parsedChunks !== null && parsedChunks !== undefined ||
             sourceUrls.length > 0 ||
             kbQuery.trim().length > 0;
           if (hasSubmittedMaterials) {
@@ -1557,7 +1557,7 @@ async function runMockGeneration(params: {
   decisionQuestion: string;
   strictMode: boolean;
 }) {
-  const { controller, encoder, industry, decisionQuestion } = params;
+  const { controller, encoder, decisionQuestion } = params;
   const sendEvent = (event: string, data: unknown) => {
     controller.enqueue(
       encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
@@ -1619,8 +1619,10 @@ async function runMockGeneration(params: {
 
 这是演示输出，不代表材料解析、证据抽取、事实核验或模型效果已经完成。\n`;
 
+  let fullText = "";
   for (const chunk of report.match(/.{1,160}/g) || [report]) {
-    sendEvent("content", { delta: chunk, text: chunk });
+    fullText += chunk;
+    sendEvent("content", { delta: chunk, text: fullText });
   }
 
   const checked = evaluateReportQuality({
